@@ -1,0 +1,62 @@
+[package]
+name = "spritx-terminal"
+version = "0.1.0"
+edition = "2021"
+description = "SpritX — a GPUI terminal with built-in remote control"
+license = "MIT"
+
+[lib]
+name = "spritx_terminal"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spritx-terminal"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+crypto_secretbox = "0.1"
+futures-util = "0.3"
+getrandom = "0.3"
+gpui = "0.2.2"
+notify-rust = "4"
+portable-pty = "0.9"
+qrcode = { version = "0.14.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tokio = { version = "1", features = ["sync", "net", "rt-multi-thread", "macros", "io-util", "time"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+toml = "0.8"
+url = "2.5.8"
+vt100 = "0.18"
+
+# xattr 0.2.3 references libc::ENOATTR, which current libc no longer exposes on
+# Linux (it aliases ENODATA there). Required by GPUI's file-watcher stack.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
+
+# Incremental compilation combined with `opt-level > 0` hits a known
+# LLVM/linker bug ("undefined hidden symbol: anon.…llvm…"). Disable it for the
+# dev profile; a full rebuild of this crate is only ~30-60 s.
+[profile.dev]
+incremental = false
+
+# `cargo run dev` uses the dev profile. Optimizing the dependency tree is the
+# big one for a GPUI app: layout, text shaping and the whole wgpu render
+# pipeline otherwise run completely unoptimized, which made a frame take
+# ~26 ms (≈37 fps) and every click wait 10-15 ms. This is NOT a release build
+# and debug info is kept for the app crate below, so breakpoints still work.
+# The first build after this change rebuilds dependencies once (~8 min).
+[profile.dev.package."*"]
+opt-level = 2
+
+# Keep this crate a little lighter than the deps so rebuilds stay fast.
+[profile.dev.package.spritx-terminal]
+opt-level = 1

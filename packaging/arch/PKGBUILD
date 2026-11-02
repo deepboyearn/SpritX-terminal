@@ -25,11 +25,19 @@ optdepends=(
   'vulkan-driver: GPU driver for the Vulkan renderer'
   'cloudflared: Internet tunnel for remote control'
 )
+# Arch's makepkg.conf turns LTO on globally and that LTO reaches the Rust build,
+# where ring's C/assembly crypto loses its internal `ring_core_*` symbols at link
+# time (briansmith/ring#2746). The release profile in Cargo.toml is what this
+# package wants anyway.
+options=(!lto)
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
   cd "$pkgname-$pkgver"
+  # rust-lld is Arch's default; ring's prebuilt assembly and lld do not get
+  # along, so drive the link with gcc like the other packages here.
+  export RUSTFLAGS="${RUSTFLAGS:-} -C linker=gcc"
   cargo build --release --locked
 }
 

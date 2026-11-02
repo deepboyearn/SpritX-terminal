@@ -252,7 +252,13 @@ jobs:
     container: archlinux:base-devel
     steps:
       - name: Install build tools
-        run: pacman -Syu --noconfirm --needed git rust cargo
+        # The runtime libraries are needed to link the binary at all, and makepkg
+        # refuses to build while any dependency of the package is missing.
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git rust cargo \
+            libxcb libxkbcommon libxkbcommon-x11 fontconfig freetype2 \
+            vulkan-icd-loader gcc-libs
 
       - uses: actions/checkout@v7
 
@@ -263,6 +269,10 @@ jobs:
           set -euo pipefail
           cd packaging/arch
           sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
+
+          # git refuses to read a repository owned by a different user, and in
+          # this container we are not the user the checkout belongs to.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
           # Source tarball of exactly this commit, laid out the way makepkg
           # expects, with its checksum filled into the PKGBUILD.

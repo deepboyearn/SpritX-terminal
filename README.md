@@ -175,6 +175,13 @@ tests workflow passed for the commit it is run on. It publishes five packages:
 | `spritx-terminal-<version>-1.x86_64.rpm` | Fedora, RHEL | `cargo generate-rpm` |
 | `spritx-terminal-<version>-1-x86_64.pkg.tar.zst` | Arch, Omarchy, EndeavourOS | `makepkg` over `packaging/arch/PKGBUILD` |
 
+GitHub does not keep the executable bit on release assets, so the AppImage needs
+one command before its first run:
+
+```sh
+chmod +x SpritX-*-x86_64.AppImage && ./SpritX-*-x86_64.AppImage
+```
+
 The version comes from `Cargo.toml`, so a release is: bump it, push, let the
 tests go green, then run the release workflow.
 

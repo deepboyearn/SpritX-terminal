@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.legacy7838_create.SpritX</id>
+  <name>SpritX</name>
+  <summary>A GPU-accelerated terminal with built-in remote control</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      SpritX is a GPU-accelerated terminal emulator for the desktop. It has tabs
+      and split panes, parses OSC 133 shell-integration markers into command
+      blocks with exit codes and timings, keeps a searchable command history,
+      and shows a file tree with git status next to the terminal.
+    </p>
+    <p>
+      Its remote control is built in and end-to-end encrypted: pair a phone or a
+      second machine and drive the same panes from there, over the LAN or a
+      Cloudflare quick tunnel. The browser client needs no installation, and
+      paired devices can be revoked at any time.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.legacy7838_create.SpritX.desktop</launchable>
+  <url type="homepage">https://github.com/legacy7838-create/SpritX-terminal</url>
+  <url type="bugtracker">https://github.com/legacy7838-create/SpritX-terminal/issues</url>
+  <developer id="io.github.legacy7838_create">
+    <name>legacy7838-create</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <keywords>
+    <keyword>terminal</keyword>
+    <keyword>shell</keyword>
+    <keyword>console</keyword>
+    <keyword>prompt</keyword>
+    <keyword>remote</keyword>
+  </keywords>
+  <releases>
+    <release version="0.0.1" date="2026-11-02">
+      <description>
+        <p>First packaged release: Flatpak, AppImage, deb, rpm and an Arch package.</p>
+      </description>
+    </release>
+  </releases>
+</component>

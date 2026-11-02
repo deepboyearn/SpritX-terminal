@@ -1,0 +1,323 @@
+# Builds the release packages and publishes them as a GitHub release.
+#
+# Manual only (Actions → release → Run workflow) and gated: the `gate` job
+# refuses to continue unless the `tests` workflow has a *successful* run for the
+# very commit this run was dispatched on, so nothing ships untested.
+#
+# Five packages, one job each:
+#   Flatpak   cross-distro bundle, built from the manifest in packaging/flatpak
+#   AppImage  portable single file, assembled from the release binary
+#   deb       Ubuntu / Debian, via cargo-deb
+#   rpm       Fedora, via cargo-generate-rpm
+#   Arch      Omarchy / Arch, via the real PKGBUILD + makepkg in an Arch container
+name: release
+
+on:
+  workflow_dispatch:
+
+# A release that is already running should finish; a second dispatch queues.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: tests first. Reads the run history rather than re-running the suite.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: tests passed on this commit
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Look for a successful test.yml run for ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          passed=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/test.yml/runs?head_sha=${{ github.sha }}&status=completed&per_page=100" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          if [ "$passed" -eq 0 ]; then
+            echo "::error::test.yml has no successful run for ${{ github.sha }} — push a fix (or re-run the tests workflow), then release."
+            exit 1
+          fi
+          echo "$passed successful test.yml run(s) for ${{ github.sha }}."
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read the version from Cargo.toml
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --format-version 1 --no-deps --locked \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "releasing $version (tag v$version)"
+
+  # ---------------------------------------------------------------------------
+  # Flatpak
+  # ---------------------------------------------------------------------------
+  flatpak:
+    name: Flatpak
+    needs: gate
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+
+      # flatpak-builder wants the manifest and everything it names relative to
+      # the manifest, so the whole repo root becomes the source.
+      - name: Move the manifest to the repository root
+        run: |
+          cp packaging/flatpak/io.github.legacy7838_create.SpritX.yml .
+          cp packaging/flatpak/io.github.legacy7838_create.SpritX.metainfo.xml .
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: io.github.legacy7838_create.SpritX.yml
+          bundle: SpritX-${{ needs.gate.outputs.version }}-x86_64.flatpak
+          artifact-name: spritx-flatpak
+          cache-key: flatpak-${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # AppImage
+  # ---------------------------------------------------------------------------
+  appimage:
+    name: AppImage
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # A plain AppDir: binary + AppRun + desktop file + icon. The libraries the
+      # binary links (xcb, xkbcommon) ship with every desktop, so they are not
+      # bundled — that keeps the AppImage small and glibc-independent.
+      - name: Assemble the AppDir
+        run: |
+          set -euo pipefail
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications \
+                   AppDir/usr/share/icons/hicolor/256x256/apps
+          install -Dm755 target/release/spritx-terminal AppDir/usr/bin/spritx-terminal
+          install -Dm755 packaging/appimage/AppRun AppDir/AppRun
+          install -Dm644 packaging/spritx-terminal.desktop AppDir/spritx-terminal.desktop
+          install -Dm644 packaging/spritx-terminal.desktop \
+            AppDir/usr/share/applications/spritx-terminal.desktop
+          install -Dm644 assets/icon-256.png AppDir/spritx-terminal.png
+          install -Dm644 assets/icon-256.png \
+            AppDir/usr/share/icons/hicolor/256x256/apps/spritx-terminal.png
+
+      - name: Fetch appimagetool
+        run: |
+          set -euo pipefail
+          curl -sSfL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+      - name: Bundle
+        env:
+          ARCH: x86_64
+          VERSION: ${{ needs.gate.outputs.version }}
+        # --appimage-extract-and-run: no FUSE inside CI runners.
+        run: ./appimagetool --appimage-extract-and-run AppDir "SpritX-$VERSION-x86_64.AppImage"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spritx-appimage
+          path: SpritX-*-x86_64.AppImage
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # deb (Ubuntu / Debian)
+  # ---------------------------------------------------------------------------
+  deb:
+    name: deb
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # Metadata lives in Cargo.toml ([package.metadata.deb]); --no-build
+      # packages the binary the step above just produced.
+      - name: Package
+        run: cargo deb --no-build --output target/deb
+
+      - name: Show what was packaged
+        run: dpkg-deb -I target/deb/*.deb && dpkg-deb -c target/deb/*.deb
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spritx-deb
+          path: target/deb/*.deb
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # rpm (Fedora)
+  # ---------------------------------------------------------------------------
+  rpm:
+    name: rpm
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-generate-rpm
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: cargo generate-rpm
+
+      - name: Show what was packaged
+        run: |
+          set -euo pipefail
+          ls -lh target/generate-rpm/*.rpm
+          if command -v rpm >/dev/null; then
+            rpm -qlp target/generate-rpm/*.rpm
+          else
+            echo "(rpm CLI not installed here; listing the payload with cpio)"
+            rpm2cpio target/generate-rpm/*.rpm | cpio -t 2>/dev/null | head -20 || true
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spritx-rpm
+          path: target/generate-rpm/*.rpm
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Arch (Omarchy, EndeavourOS, plain Arch)
+  # ---------------------------------------------------------------------------
+  arch:
+    name: Arch package
+    needs: gate
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed git rust cargo
+
+      - uses: actions/checkout@v7
+
+      - name: Package with makepkg
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd packaging/arch
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
+
+          # Source tarball of exactly this commit, laid out the way makepkg
+          # expects, with its checksum filled into the PKGBUILD.
+          git -C "$GITHUB_WORKSPACE" archive \
+            --prefix="spritx-terminal-$VERSION/" \
+            -o "$GITHUB_WORKSPACE/packaging/arch/spritx-terminal-$VERSION.tar.gz" HEAD
+          sums=$(sha256sum "spritx-terminal-$VERSION.tar.gz" | cut -d' ' -f1)
+          sed -i "s/^sha256sums=('SKIP')/sha256sums=('$sums')/" PKGBUILD
+
+          # makepkg refuses to run as root.
+          useradd -m builder
+          chown -R builder "$PWD" "$GITHUB_WORKSPACE"
+          su builder -c "cd '$PWD' && makepkg -f --noconfirm"
+
+          ls -l ./*.pkg.tar.zst
+          sudo pacman -Qip ./*.pkg.tar.zst
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spritx-arch
+          path: packaging/arch/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish: one release, five assets. Runs only if every package built.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish
+    needs: [gate, flatpak, appimage, deb, rpm, arch]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List the assets
+        run: ls -lh dist
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists — replacing its assets."
+          else
+            gh release create "$TAG" \
+              --target "${{ github.sha }}" \
+              --title "SpritX $VERSION" \
+              --generate-notes
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          gh release view "$TAG" --json url,assets --jq '.url, (.assets[].name)'

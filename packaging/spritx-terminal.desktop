@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SpritX
+GenericName=Terminal
+Comment=A GPU-accelerated terminal with built-in remote control
+Exec=spritx-terminal
+Icon=spritx-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;prompt;ssh;remote;
+StartupNotify=true

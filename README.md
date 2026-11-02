@@ -161,6 +161,23 @@ looks for it next to the crate:
 Without it, SpritX starts your shell with `-l` and the terminal itself works
 exactly the same — only the block, history and cwd extras stay off.
 
+## Packages
+
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which is started by hand from the Actions tab and refuses to run unless the
+tests workflow passed for the commit it is run on. It publishes five packages:
+
+| Package | For | Built with |
+| --- | --- | --- |
+| `SpritX-<version>-x86_64.flatpak` | cross-distro, sandboxed | the manifest in `packaging/flatpak` |
+| `SpritX-<version>-x86_64.AppImage` | portable, nothing to install | `appimagetool` over an AppDir |
+| `spritx-terminal_<version>_amd64.deb` | Ubuntu, Debian, Mint | `cargo deb` |
+| `spritx-terminal-<version>-1.x86_64.rpm` | Fedora, RHEL | `cargo generate-rpm` |
+| `spritx-terminal-<version>-1-x86_64.pkg.tar.zst` | Arch, Omarchy, EndeavourOS | `makepkg` over `packaging/arch/PKGBUILD` |
+
+The version comes from `Cargo.toml`, so a release is: bump it, push, let the
+tests go green, then run the release workflow.
+
 ## Development
 
 ```sh

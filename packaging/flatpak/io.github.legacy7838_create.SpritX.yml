@@ -1,0 +1,48 @@
+# Flatpak manifest for SpritX, built by .github/workflows/release.yml.
+#
+# The workflow copies this file (and the metainfo below) to the repository root
+# before calling flatpak-builder, so `path: .` is the checked-out release
+# commit — see the "Package (Flatpak)" job.
+app-id: io.github.legacy7838_create.SpritX
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: spritx-terminal
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri          # the Vulkan renderer needs the GPU
+  - --share=network       # a terminal without the network is not a terminal
+  - --filesystem=home     # shells run in, and read, your files
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/spritx/cargo
+  # cargo has to reach crates.io for this build. A Flathub submission would
+  # instead ship a `cargo vendor` tree and build with --offline; this bundle is
+  # built by our own workflow, so it takes the shortcut.
+  build-args:
+    - --share=network
+
+modules:
+  - name: spritx
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/spritx-terminal /app/bin/spritx-terminal
+      - install -Dm644 packaging/spritx-terminal.desktop
+        /app/share/applications/io.github.legacy7838_create.SpritX.desktop
+      - install -Dm644 assets/icon-512.png
+        /app/share/icons/hicolor/512x512/apps/io.github.legacy7838_create.SpritX.png
+      - install -Dm644 io.github.legacy7838_create.SpritX.metainfo.xml
+        /app/share/metainfo/io.github.legacy7838_create.SpritX.metainfo.xml
+    sources:
+      - type: dir
+        path: .

@@ -306,6 +306,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # gh runs `git` for repository context, so it needs a checkout; GH_REPO is
+      # set below as well so the release commands never depend on it.
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -317,6 +321,7 @@ jobs:
       - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.gate.outputs.tag }}
           VERSION: ${{ needs.gate.outputs.version }}
         run: |

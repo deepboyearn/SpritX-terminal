@@ -1,0 +1,64 @@
+# Builds and tests SpritX on every push (and on demand from the Actions tab).
+#
+# System libraries first: GPUI's X11 backend links libxkbcommon (+libxkbcommon-x11)
+# and libxcb, its Wayland backend links libwayland-client, and zed-font-kit links
+# fontconfig and freetype — all located through pkg-config at build time. Vulkan
+# is loaded at runtime, so it is not a build dependency.
+#
+# The job runs the dev profile on purpose: the dependency tree is compiled with
+# opt-level 2 there, which is what the frame budgets in tests/latency.rs are
+# tuned for (they measure ~120 us against a 4 ms ceiling on a desktop).
+name: tests
+
+on:
+  push:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the previous run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential \
+            libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev
+
+      - name: Check the libraries are discoverable
+        run: |
+          for lib in wayland-client xkbcommon xkbcommon-x11 xcb fontconfig freetype2; do
+            pkg-config --exists "$lib" || { echo "::error::missing pkg-config module: $lib"; exit 1; }
+            printf '%-16s %s\n' "$lib" "$(pkg-config --modversion "$lib")"
+          done
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The first run pays for the slow dependency build (see the profile notes
+      # in Cargo.toml); every run after that reuses this cache.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: cargo test
+        run: cargo test --locked --no-fail-fast
+        # The window-opening smoke tests skip themselves without SPRITX_UI_TESTS,
+        # which is what we want on a headless runner; their output says so.

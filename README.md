@@ -5,6 +5,7 @@ same panes from another SpritX, or from a phone browser over an end-to-end
 encrypted link.
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+[![tests](https://github.com/legacy7838-create/SpritX-terminal/actions/workflows/test.yml/badge.svg)](https://github.com/legacy7838-create/SpritX-terminal/actions/workflows/test.yml)
 
 ---
 
@@ -168,6 +169,10 @@ cargo test                  # integration tests: terminal, config, history,
 SPRITX_UI_TESTS=1 cargo test  # also runs the smoke tests, which open a real
                               # window for ~3 seconds each
 ```
+
+Every push runs the same suite on GitHub Actions
+([`.github/workflows/test.yml`](.github/workflows/test.yml), Ubuntu with the
+X11/Wayland/font libraries installed).
 
 Runtime hooks used for automation and profiling:
 

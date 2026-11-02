@@ -32,7 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      # v5+ runs on Node 24; v4 is still on the deprecated Node 20.
+      - uses: actions/checkout@v7
 
       - name: Install system libraries
         run: |

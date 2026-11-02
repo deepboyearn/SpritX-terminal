@@ -29,6 +29,25 @@ fn entry(command: &str, cwd: &str, exit_code: i32, branch: &str, at: i64) -> His
     }
 }
 
+/// The store hands writes to a background thread so a finished command never
+/// blocks the UI on disk I/O (see `HistoryStore::append`), so a test that reads
+/// the file back has to wait for the line to land.
+fn wait_for_lines(path: &Path, want: usize) {
+    for _ in 0..500 {
+        let got = std::fs::read_to_string(path)
+            .map(|body| body.lines().count())
+            .unwrap_or(0);
+        if got >= want {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!(
+        "history writer never flushed {want} lines to {}",
+        path.display()
+    );
+}
+
 fn store_with_sample(tag: &str) -> (PathBuf, HistoryStore) {
     let dir = temp_dir(tag);
     let store = HistoryStore::new(dir.join("history.jsonl"));
@@ -41,6 +60,7 @@ fn store_with_sample(tag: &str) -> (PathBuf, HistoryStore) {
     ] {
         store.append(e).unwrap();
     }
+    wait_for_lines(store.path(), 5);
     (dir, store)
 }
 
@@ -100,6 +120,7 @@ fn history_append_skips_space_prefix_blank_and_ignored() {
     store.append(HistoryEntry::new("export GITHUB_TOKEN=abc")).unwrap();
     store.append(HistoryEntry::new("ls -la")).unwrap();
 
+    wait_for_lines(&path, 1);
     let body = std::fs::read_to_string(&path).unwrap();
     assert_eq!(body.lines().count(), 1);
     assert!(body.contains("ls -la"));
@@ -152,26 +173,25 @@ fn history_read_is_bounded_to_newest_window() {
 }
 
 #[test]
-fn config_round_trip_and_secret_stripping() {
+fn config_round_trips_through_toml_and_json() {
     let dir = temp_dir("config");
     let path = dir.join("config.toml");
 
     let mut cfg = AppConfig::default();
     cfg.appearance.font_size = 17;
     cfg.remote.port = 6000;
-    cfg.ai.openai_api_key = "sk-secret".into();
     config::save_to(&path, &cfg).unwrap();
 
     let loaded = config::load_from(&path);
     assert_eq!(loaded.appearance.font_size, 17);
     assert_eq!(loaded.remote.port, 6000);
-    assert_eq!(loaded.ai.openai_api_key, "sk-secret");
 
+    // The JSON export is a faithful copy — `AppConfig::without_secrets` has
+    // nothing to blank today — and comes back through the importer.
     let exported = config::export_json(&loaded).unwrap();
-    assert!(!exported.contains("sk-secret"));
     let imported = config::import_json(&exported).unwrap();
     assert_eq!(imported.appearance.font_size, 17);
-    assert!(imported.ai.openai_api_key.is_empty());
+    assert_eq!(imported.remote.port, 6000);
 
     let from_toml = config::import_file(&path).unwrap();
     assert_eq!(from_toml.remote.port, 6000);

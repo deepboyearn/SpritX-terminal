@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "SpritX — a GPUI terminal with built-in remote control"
 license = "MIT"
+authors = ["legacy7838-create"]
+repository = "https://github.com/legacy7838-create/SpritX-terminal"
+readme = "README.md"
+keywords = ["terminal", "gpui", "pty", "remote"]
+categories = ["gui", "command-line-utilities"]
 
 [lib]
 name = "spritx_terminal"

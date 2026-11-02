@@ -1,0 +1,205 @@
+# SpritX
+
+A GPU-accelerated terminal emulator with built-in remote control: open the
+same panes from another SpritX, or from a phone browser over an end-to-end
+encrypted link.
+
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+
+---
+
+## Highlights
+
+**Terminal**
+
+- Split panes (up to four per tab), tabs, and layout presets.
+- `vt100`-based screen model with scrollback, mouse reporting passed through
+  to the child, text selection, copy/paste, and alternate-screen support.
+- OSC 133 command blocks: prompt, command, output, exit code and duration are
+  parsed from shell-integration markers; OSC 7 keeps track of the shell's
+  working directory.
+- Ten built-in themes (SpritX Dark, Catppuccin Mocha/Latte, Dracula, Nord,
+  Tokyo Night, Gruvbox Dark, Solarized Dark, One Dark, Rosé Pine) plus a
+  fully customisable 21-colour theme block.
+- Configurable font family and size, cursor style (block/bar/underline),
+  cursor blink and scrollback length.
+- Desktop notification when a long-running command finishes.
+
+**Workspace**
+
+- File tree beside the terminal: directory listing command configurable, git
+  branch and dirty state in the header, and context-menu actions
+  (list / open / view / edit) driven by command templates.
+- Command history in `~/.config/spritx/history.jsonl`, searchable from the
+  command palette with filters such as `failed`, `ok`, `here`, `cwd:`,
+  `project:` and `branch:`.
+- Command palette for actions, tabs, panes and history.
+- Settings UI that writes straight to `config.toml`.
+
+**Remote control**
+
+- This SpritX can act as a server: pair a phone or a second machine, then drive
+  the same panes from there. Input, resizes and tab switches are applied by the
+  desktop's own event loop, so both sides see one terminal.
+- Every frame after the handshake is sealed with NaCl `secretbox`
+  (XSalsa20-Poly1305). The one-time pairing secret travels in the URL *fragment*,
+  which browsers never send to the server or the tunnel, and a device that fails
+  the handshake is refused rather than downgraded to plaintext.
+- Optional `cloudflared` quick tunnel for access over HTTPS from anywhere;
+  without it the server binds the LAN address.
+- Paired devices are listed in the UI and can be revoked at any time.
+- It can also act as a client: paste a pairing link into the command palette to
+  drive another SpritX from a pane here.
+
+**Browser client**
+
+- Served by the same binary at `/`, no build step: terminal picker, extra key
+  row (Esc, Tab, Ctrl, arrows, `^C`, `^L`, `^D`), path-completion chips, font
+  size controls and a WebGL renderer when the device supports it.
+- Touch is translated to mouse and wheel events for full-screen TUIs, and the
+  software keyboard follows the caret: it comes up when you tap the input line
+  of a program that owns the mouse (or a shell prompt), not on every tap.
+- Terminal size follows the device's own box, so panes fit the phone screen
+  exactly; the desktop pane takes its size back when the last client leaves.
+- The page loads xterm.js, its fit/webgl addons and tweetnacl from jsDelivr with
+  SRI hashes, so the browser needs network access.
+
+## Requirements
+
+- Linux, Wayland or X11 (that is what this port is built and tested on; the
+  file-tree defaults and the `cloudflared` lookup also carry Windows and macOS
+  variants).
+- A Rust toolchain (edition 2021) and a working GL/Vulkan stack for GPUI.
+- Optional: `cloudflared` for the Internet tunnel, `git` for the branch
+  indicator, a Nerd Font for the icon set (the default font stack leads with
+  `JetBrainsMono Nerd Font`).
+
+## Build and run
+
+```sh
+cargo run --release
+```
+
+Notes on the build:
+
+- The first build takes a few minutes by design: the dev profile compiles the
+  dependency tree with `opt-level = 2` and turns incremental compilation off
+  (see the comments in `Cargo.toml`). Later rebuilds of this crate are quick.
+- `vendor/xattr` is a local patch of `xattr 0.2.3`, which references
+  `libc::ENOATTR` — an alias recent `libc` no longer exposes on Linux. It is
+  required by GPUI's file-watcher stack.
+- `SPRITX_SMOKE=1` quits right after startup, which is handy in scripts.
+
+## Keyboard shortcuts
+
+`Ctrl/Cmd` means `Ctrl` on Linux and Windows, `Cmd` elsewhere.
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl/Cmd+T` | new tab |
+| `Ctrl/Cmd+W` | close pane |
+| `Ctrl/Cmd+Tab`, `Ctrl/Cmd+Shift+Tab` | next / previous tab |
+| `Ctrl/Cmd+Shift+]`, `Ctrl/Cmd+Shift+[` | next / previous tab |
+| `Ctrl/Cmd+1` … `9` | select tab |
+| `Ctrl/Cmd+Shift+D`, `Ctrl/Cmd+Shift+E` | split right / split down |
+| `Alt+←/→/↑/↓` | move focus between panes |
+| `Ctrl/Cmd+Shift+P` | command palette |
+| `Ctrl/Cmd+Shift+H` | command history |
+| `Ctrl/Cmd+,` | settings |
+| `Ctrl/Cmd+Shift+C`, `Ctrl/Cmd+Insert` | copy selection |
+| `Ctrl/Cmd+Shift+V`, `Shift+Insert` | paste |
+| `Ctrl/Cmd+Shift+A` | select all |
+| `Ctrl/Cmd` `+` / `-` / `0` | font size up / down / reset |
+| `Shift+PgUp`, `Shift+PgDn` | scroll ten lines |
+
+## Remote control
+
+1. Click the phone icon in the toolbar and choose **Start sharing**. SpritX
+   binds `remote.port` (4530 by default) — loopback only when it also opens a
+   tunnel, otherwise the LAN address — and shows a one-time pairing link and QR
+   code.
+2. Open that link on the other device. The page pairs once, stores its own
+   device key locally and reconnects with it afterwards; the same device never
+   needs a new code.
+3. Pick a terminal in the browser's picker and start typing.
+
+The pairing code is single-use and expires; devices can be revoked from the
+remote panel, which also cuts their live connections.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/spritx/config.toml`, falling back to
+`~/.config/spritx/config.toml`. Keys are camelCase; every field has a default,
+so a partial file still loads. The file is written atomically with `0600`
+permissions, and a corrupt file is backed up next to it as
+`config.toml.broken`.
+
+| Section | Keys |
+| --- | --- |
+| `[appearance]` | `fontFamily`, `fontSize`, `cursorStyle`, `cursorBlink`, `scrollback`, `[appearance.theme]` (21 colours) |
+| `[behavior]` | `focusFollowsMouse`, `showGitBranch`, `persistBlocks` |
+| `[shell]` | `program`, `args` |
+| `[notifications]` | `enabled`, `minDurationSec`, `sound` |
+| `[fileTree]` | `dirList`, `dirOpen`, `fileView`, `fileEdit`, `fileOpen` — command templates, `{path}` is replaced (POSIX-quoted) |
+| `[remote]` | `port`, `autoTunnel` |
+| `[history]` | `enabled`, `ignore` (glob patterns; matching commands are never recorded) |
+| `[keybindings]` | action → keystroke map |
+
+### Shell integration
+
+Command blocks, exit codes and the working-directory tracking come from a small
+shell-integration script that SpritX sources through a generated rc file
+(`~/.config/spritx/gpui-bashrc` for bash, `gpui-zdotdir` for zsh). The port
+looks for it next to the crate:
+
+```
+../scripts/spritx-shell-init.bash
+../scripts/spritx-shell-init.zsh
+```
+
+Without it, SpritX starts your shell with `-l` and the terminal itself works
+exactly the same — only the block, history and cwd extras stay off.
+
+## Development
+
+```sh
+cargo test                  # integration tests: terminal, config, history,
+                            # remote protocol, OSC parsing
+SPRITX_UI_TESTS=1 cargo test  # also runs the smoke tests, which open a real
+                              # window for ~3 seconds each
+```
+
+Runtime hooks used for automation and profiling:
+
+| Variable | Effect |
+| --- | --- |
+| `SPRITX_OPEN=settings\|palette\|remote\|remote-menu` | open a modal (or the remote panel) at launch |
+| `SPRITX_SMOKE=1` | quit after three seconds |
+| `SPRITX_PROFILE=1` | print the latency profiler — debug builds do this by default, release builds need the variable. `SPRITX_ROWS=1` adds a per-row breakdown, `SPRITX_FRAMES=1` logs every frame, `SPRITX_QUIET=1` silences all of it |
+| `SPRITX_DEBUG_KEYS=1` | log every keystroke |
+
+## Project layout
+
+```
+src/main.rs          window and application bootstrap
+src/terminal.rs      PTY session, vt100 screen, grid rendering, cell metrics
+src/keys.rs          keystroke → terminal byte encoding
+src/theme.rs         theme presets and loading
+src/state.rs         panes, tabs, settings, palette state
+src/metrics.rs       optional latency profiler
+src/screens/         app_shell (window, actions, terminal pump), pane_tree,
+                     tab_bar, file_tree, overlays
+src/components/      icons, buttons, toggles, text input, dropdowns, menus
+src/backend/
+  remote_server.rs   HTTP/WebSocket server, pairing, sealed frames, replay
+  remote.rs          handshake, device store, protocol types
+  remote_client.rs   outbound SpritX↔SpritX links
+  osc.rs             OSC 7 / 133 / 7733 parsing (cwd, blocks, aliases)
+  history.rs         command history store and search
+  config.rs          config load/save/export
+  git.rs, files.rs   branch information, file-tree helpers
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

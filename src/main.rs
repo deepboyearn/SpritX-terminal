@@ -5,7 +5,7 @@ use spritx_terminal::screens::app_shell::SpritXApp;
 
 fn main() {
     Application::new()
-        .with_assets(Assets::embedded())
+        .with_assets(Assets)
         .run(|cx: &mut App| {
             let bounds = Bounds::centered(None, size(px(1100.0), px(700.0)), cx);
             cx.open_window(

@@ -1,0 +1,79 @@
+# Compile check — builds only, runs no tests, and is started by hand.
+#
+# `test.yml` already builds the crate as part of running the suite on every
+# push; this is the quicker "does it still compile, and are the UI icons really
+# inside the binary?" button for when you do not want to wait for the tests.
+#
+# Start it from Actions → build → Run workflow, optionally narrowing the profile.
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Which profile to compile
+        type: choice
+        options: [both, debug, release]
+        default: both
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: cargo build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same libraries test.yml installs: GPUI links libxcb, libxkbcommon(-x11)
+      # and libwayland-client, and zed-font-kit links fontconfig and freetype.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # --all-targets also compiles the test and bench sources, which is where a
+      # stale test could otherwise stay broken until someone runs the suite.
+      - name: cargo build (debug)
+        if: inputs.profile == 'both' || inputs.profile == 'debug'
+        run: cargo build --locked --all-targets
+
+      - name: cargo build (release)
+        if: inputs.profile == 'both' || inputs.profile == 'release'
+        run: cargo build --release --locked
+
+      # The icons are embedded by build.rs at compile time. They used to be read
+      # from CARGO_MANIFEST_DIR at runtime, which looked fine when the app ran
+      # from the source tree and left every packaged build with no icons: the
+      # buttons were still there, just empty. This catches that regression.
+      - name: Check the icons are inside the binary
+        if: inputs.profile == 'both' || inputs.profile == 'release'
+        run: |
+          set -euo pipefail
+          binary=target/release/spritx-terminal
+          count=$(strings -a "$binary" | grep -c '<svg' || true)
+          echo "embedded <svg> documents: $count"
+          test "$count" -ge 38
+          for icon in IconFolder IconAppearance IconSmartphone IconSettings IconTheme; do
+            strings -a "$binary" | grep -q "$icon" || {
+              echo "::error::$icon is not embedded in the binary"; exit 1;
+            }
+          done
+          echo "all sampled icons are embedded"

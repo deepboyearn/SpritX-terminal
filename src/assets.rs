@@ -1,39 +1,35 @@
-use std::fs;
-use std::path::PathBuf;
+use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 
-pub struct Assets {
-    pub base: PathBuf,
-}
+include!(concat!(env!("OUT_DIR"), "/icons.rs"));
+
+/// The UI's icons, baked into the executable by `build.rs`.
+///
+/// Nothing is read from disk: every release is a bare binary, so the assets
+/// have to be inside it.
+pub struct Assets;
 
 impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        fs::read(self.base.join(path))
-            .map(|data| Some(std::borrow::Cow::Owned(data)))
-            .map_err(|err| err.into())
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        // `Icon::path` asks for "icons/IconName.svg".
+        let name = path.strip_prefix("icons/").unwrap_or(path);
+        let name = name.strip_suffix(".svg").unwrap_or(name);
+        Ok(ICONS
+            .iter()
+            .find(|(icon, _)| *icon == name)
+            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        fs::read_dir(self.base.join(path))
-            .map(|entries| {
-                entries
-                    .filter_map(|entry| {
-                        entry
-                            .ok()
-                            .and_then(|entry| entry.file_name().into_string().ok())
-                            .map(SharedString::from)
-                    })
-                    .collect()
-            })
-            .map_err(|err| err.into())
-    }
-}
-
-impl Assets {
-    pub fn embedded() -> Self {
-        Self {
-            base: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
-        }
+        let dir = path.trim_end_matches('/');
+        Ok(if dir.is_empty() || dir == "icons" {
+            ICONS
+                .iter()
+                .map(|(name, _)| SharedString::from(format!("{name}.svg")))
+                .collect()
+        } else {
+            Vec::new()
+        })
     }
 }

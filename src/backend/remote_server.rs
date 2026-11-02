@@ -398,6 +398,13 @@ impl RemoteServer {
         self.state.runtime.lock().map(|r| r.running).unwrap_or(false)
     }
 
+    /// How many clients are attached right now. A plain atomic load, unlike
+    /// [`RemoteServer::status`], which formats strings for the UI — the pane
+    /// renderer asks this on every frame (see `render_live_terminal`).
+    pub fn client_count(&self) -> usize {
+        self.state.clients.load(Ordering::Relaxed)
+    }
+
     /// The port actually bound (0 when stopped).
     pub fn port(&self) -> u16 {
         self.state.runtime.lock().map(|r| r.port).unwrap_or(0)
@@ -1650,20 +1657,20 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <title>SpritX Remote</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" integrity="sha384-tStR1zLfWgsiXCF3IgfB3lBa8KmBe/lG287CL9WCeKgQYcp1bjb4/+mwN6oti4Co" crossorigin="anonymous"/>
 <style>
-  html,body{margin:0;height:100%;background:#0e1014;overflow:hidden;overscroll-behavior:none;font:13px system-ui,sans-serif}
-  #app{position:fixed;left:0;top:0;right:0;display:flex;flex-direction:column;overflow:hidden}
-  #bar{flex:0 0 30px;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:#fff;background:#1b2330;padding:0 10px}
+  html,body{margin:0;height:100%;background:#0e1014;overflow:hidden;overscroll-behavior:none;font:13px system-ui,sans-serif;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}
+  #app{position:fixed;left:0;top:0;right:0;bottom:0;display:flex;flex-direction:column;overflow:hidden}
+  #bar{flex:0 0 34px;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:#fff;background:#1b2330;padding:env(safe-area-inset-top, 0px) 10px 0 10px}
   #msg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  #dc{background:#3a2330;color:#ff9bb0;border:1px solid #6b3347;border-radius:5px;padding:3px 9px;font-size:12px}
+  #dc{background:#3a2330;color:#ff9bb0;border:1px solid #6b3347;border-radius:5px;padding:3px 9px;font-size:12px;touch-action:manipulation;user-select:none;-webkit-user-select:none}
   /* --- messaging-style terminal picker (shown on connect) --- */
-  #pick{position:absolute;left:0;top:0;right:0;bottom:0;z-index:30;background:#0e1014;display:none;flex-direction:column}
+  #pick{position:absolute;left:0;top:0;right:0;bottom:0;z-index:30;background:#0e1014;display:none;flex-direction:column;padding-top:env(safe-area-inset-top, 0px);padding-bottom:env(safe-area-inset-bottom, 0px)}
   #pick.show{display:flex}
   #pick-head{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #1d2530}
   #pick-title{flex:1 1 auto;font-size:16px;font-weight:600;color:#e8f2ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  #pick-back{flex:0 0 auto;background:#1a2230;color:#cbd5e1;border:1px solid #283242;border-radius:7px;width:30px;height:30px;font-size:15px;line-height:1}
-  #pick-new{background:#1a2230;color:#4ea1ff;border:1px solid #283242;border-radius:7px;width:30px;height:30px;font-size:18px;font-weight:700;line-height:1}
-  #pick-list{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch}
-  .pick-item{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid #161d27}
+  #pick-back{flex:0 0 auto;background:#1a2230;color:#cbd5e1;border:1px solid #283242;border-radius:7px;width:32px;height:32px;font-size:15px;line-height:1;touch-action:manipulation}
+  #pick-new{background:#1a2230;color:#4ea1ff;border:1px solid #283242;border-radius:7px;width:32px;height:32px;font-size:18px;font-weight:700;line-height:1;touch-action:manipulation}
+  #pick-list{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+  .pick-item{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid #161d27;touch-action:manipulation;user-select:none;-webkit-user-select:none}
   .pick-item:active{background:#141b25}
   .pick-item.on{background:#111b2b}
   .pick-av{flex:0 0 auto;width:40px;height:40px;border-radius:50%;background:#1b2635;color:#8ab4ff;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;border:1px solid #28384d}
@@ -1675,18 +1682,21 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .pick-item.on .pick-sub{color:#56d364}
   .pick-empty{padding:22px 14px;color:#5e6a7a;font-size:13px;text-align:center}
   #pick-foot{flex:0 0 auto;padding:8px 14px;font-size:11.5px;color:#5e6a7a;border-top:1px solid #161d27}
-  #back,#fdec,#finc{background:#1a2230;color:#cbd5e1;border:1px solid #283242;border-radius:5px;padding:3px 8px;font-size:14px;line-height:1}
+  #back,#fdec,#finc{background:#1a2230;color:#cbd5e1;border:1px solid #283242;border-radius:5px;padding:4px 9px;font-size:14px;line-height:1;touch-action:manipulation;user-select:none;-webkit-user-select:none}
   #dim{flex:0 0 auto;font-size:11px;color:#7f8b9c;font-variant-numeric:tabular-nums;padding:0 5px}
   #msg{flex:1 1 auto;min-width:0}
-  #term{flex:1 1 auto;min-height:0;padding:2px;overflow:hidden}
+  #term{flex:1 1 auto;min-height:0;padding:2px 0 2px 2px;overflow:hidden;touch-action:none}
   .xterm{height:100%}
-  #assist{flex:0 0 auto;background:#141a24;border-top:1px solid #232c3a}
+  .xterm .xterm-screen{width:100% !important}
+  .xterm .xterm-viewport{overflow-y:auto !important;scrollbar-width:none;-ms-overflow-style:none}
+  .xterm .xterm-viewport::-webkit-scrollbar{display:none;width:0;height:0}
+  #assist{flex:0 0 auto;background:#141a24;border-top:1px solid #232c3a;padding-bottom:env(safe-area-inset-bottom, 0px)}
   #chips{display:flex;gap:6px;overflow-x:auto;padding:5px 6px;white-space:nowrap;-webkit-overflow-scrolling:touch}
   #chips:empty{display:none}
-  .chip{flex:0 0 auto;background:#1f2937;color:#cbd5e1;border:1px solid #2b3647;border-radius:6px;padding:5px 9px;font-size:13px;font-family:ui-monospace,monospace}
+  .chip{flex:0 0 auto;background:#1f2937;color:#cbd5e1;border:1px solid #2b3647;border-radius:6px;padding:5px 9px;font-size:13px;font-family:ui-monospace,monospace;touch-action:manipulation;user-select:none;-webkit-user-select:none}
   .chip.d{color:#8ab4ff;border-color:#33405a}
   #keys{display:flex;gap:5px;overflow-x:auto;padding:5px 6px;white-space:nowrap;-webkit-overflow-scrolling:touch}
-  .key{flex:0 0 auto;background:#222b39;color:#e6e6e6;border:1px solid #2f3a4c;border-radius:6px;padding:7px 11px;font-size:13px;min-width:30px;text-align:center;user-select:none;-webkit-user-select:none}
+  .key{flex:0 0 auto;background:#222b39;color:#e6e6e6;border:1px solid #2f3a4c;border-radius:6px;padding:7px 11px;font-size:13px;min-width:30px;text-align:center;user-select:none;-webkit-user-select:none;touch-action:manipulation}
   .key:active{background:#2d3a4d}
   .key.on{background:#2b6cff;border-color:#2b6cff;color:#fff}
   #overlay{display:none;position:fixed;inset:0;z-index:50;background:rgba(8,10,14,0.93);align-items:center;justify-content:center;padding:26px}
@@ -1696,7 +1706,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#56d364;margin-right:6px;vertical-align:1px}
   #ov-title{font-size:19px;font-weight:600;margin-bottom:6px}
   #ov-sub{font-size:13px;color:#9aa4b2;margin-bottom:20px;line-height:1.45}
-  #reconnect{background:#101a2b;color:#e8f2ff;border:1px solid #4ea1ff;border-radius:10px;padding:12px 26px;font-size:15px;font-weight:600;letter-spacing:.02em;box-shadow:0 0 0 1px rgba(78,161,255,.25), 0 0 20px rgba(78,161,255,.45), inset 0 0 14px rgba(78,161,255,.12);animation:rcGlow 2.4s ease-in-out infinite;transition:background .15s}
+  #reconnect{background:#101a2b;color:#e8f2ff;border:1px solid #4ea1ff;border-radius:10px;padding:12px 26px;font-size:15px;font-weight:600;letter-spacing:.02em;touch-action:manipulation;user-select:none;-webkit-user-select:none;box-shadow:0 0 0 1px rgba(78,161,255,.25), 0 0 20px rgba(78,161,255,.45), inset 0 0 14px rgba(78,161,255,.12);animation:rcGlow 2.4s ease-in-out infinite;transition:background .15s}
   #reconnect:active{background:#16243a;animation:none;box-shadow:0 0 0 1px rgba(78,161,255,.55), 0 0 30px rgba(78,161,255,.7), inset 0 0 16px rgba(78,161,255,.2)}
   @keyframes rcGlow{0%,100%{box-shadow:0 0 0 1px rgba(78,161,255,.22), 0 0 14px rgba(78,161,255,.32), inset 0 0 12px rgba(78,161,255,.10)}50%{box-shadow:0 0 0 1px rgba(78,161,255,.4), 0 0 28px rgba(78,161,255,.62), inset 0 0 16px rgba(78,161,255,.16)}}
 </style>
@@ -1747,6 +1757,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   var pickItems=[], pickActive=null, pickView='tabs', pickTab=null, pickTabName='';
   var lastActive=null;
   var closedByUser=false;
+  var pingTimer=null;
   var small = Math.min(window.innerWidth, window.innerHeight) < 480;
   // Font size the user picked (the phone default is small so more columns —
   // and therefore wide CLI tools — fit without wrapping).
@@ -1770,6 +1781,39 @@ const INDEX_HTML: &str = r##"<!doctype html>
       term.loadAddon(gl);
     }
   }catch(_){}
+  // A phone has no hardware keyboard, so focusing the terminal raises the
+  // software one, which then covers the pane until focus goes elsewhere. A
+  // desktop wants the opposite: click-to-focus is how you type. Same code, two
+  // defaults — `touchUI` decides which one, and taps inside the app are judged
+  // against the caret (see `onCaretLine`).
+  var touchUI = !!(window.matchMedia && window.matchMedia('(hover: none)').matches);
+  function focusTerm(){ term.focus(); if(term.textarea) term.textarea.focus(); }
+  function blurTerm(){ if(term.textarea && document.activeElement === term.textarea) term.textarea.blur(); }
+  // Whether the running app owns the pointer. The desktop puts the session's
+  // modes back at the head of the replay it sends on attach (see set_modes in
+  // remote_server.rs), so this parser knows about them even though the app set
+  // them before this page ever connected.
+  function mouseActive(){
+    try{ return term.modes.mouseTrackingMode!=='none'; }catch(_){ return false; }
+  }
+  // Whether a touch at `clientY` landed on the app's input line — the row it
+  // put the caret on. An app that owns the pointer draws its own input box
+  // around that caret (border, input, border), so there the row above and below
+  // count as well; without one (a shell prompt) everything from the caret's line
+  // down is where typing goes. Any other tap is a click on the app's UI, and
+  // must not raise the keyboard: the panel it opens would be buried under it.
+  function onCaretLine(clientY){
+    var cell = cellMetrics();
+    var el = term.element || termEl;
+    if(!cell || !el) return true;          // no metrics yet: behave as before
+    var b = term.buffer.active;
+    var row = Math.floor((clientY - el.getBoundingClientRect().top) / cell.height);
+    // The caret's row in the viewport. A caret scrolled off the bottom pins to
+    // the last row rather than leaving no tappable line at all.
+    var caret = b.cursorY - b.baseY;
+    caret = Math.max(0, Math.min(term.rows - 1, caret));
+    return mouseActive() ? Math.abs(row - caret) <= 1 : row >= caret - 1;
+  }
   // Fit immediately (before the first paint) and again on the next frame, so a
   // fresh load/refresh already shows the right size — no A−/A+ tap needed.
   layout();
@@ -1780,34 +1824,63 @@ const INDEX_HTML: &str = r##"<!doctype html>
   // --- line tracking (best-effort, for path completion) ---
   var curLine='';
   function track(s){
-    if(s.indexOf('\x1b')>=0) return;            // escape seq (arrows...) — skip
+    // Walk char-by-char; on ESC skip the full CSI/OSC sequence instead of
+    // bailing on the entire string — arrow keys from the key bar or horizontal
+    // swipes would otherwise freeze curLine for the rest of the session.
     for(var i=0;i<s.length;i++){
       var code=s.charCodeAt(i);
-      if(code===13||code===10){ curLine=''; }                       // Enter
+      if(code===27){                              // ESC — skip escape sequence
+        i++;                                      // consume '[', ']', 'O', etc.
+        if(i<s.length && s.charCodeAt(i)===93){  // OSC: skip until ST or BEL
+          while(i<s.length && s.charCodeAt(i)!==7 && !(s.charCodeAt(i)===92 && i>0 && s.charCodeAt(i-1)===27)) i++;
+        } else {                                  // CSI / SS3: skip until letter
+          while(i<s.length-1){ var ec=s.charCodeAt(i+1); if((ec>=64&&ec<=90)||(ec>=97&&ec<=122)) break; i++; }
+          i++;                                    // consume the final letter
+        }
+        continue;
+      }
+      if(code===13||code===10){ curLine=''; }                    // Enter
       else if(code===127||code===8){ curLine=curLine.slice(0,-1); } // backspace
-      else if(code===3||code===21){ curLine=''; }                   // ^C / ^U
+      else if(code===3||code===21){ curLine=''; }                // ^C / ^U
       else if(code>=32){ curLine+=s[i]; }
     }
   }
-  function curToken(){ if(curLine.indexOf(' ')<0) return null; var p=curLine.split(/\s+/); return p[p.length-1]; }
+  // Split on unescaped whitespace so paths like "my\ file" stay whole.
+  function curToken(){
+    var esc=curLine.replace(/\\ /g,'\x01');     // temporarily hide escaped spaces
+    if(esc.indexOf(' ')<0) return null;
+    var p=esc.split(/ +/);
+    if(p.length<2) return null;
+    return p[p.length-1].replace(/\x01/g,'\\ '); // restore them
+  }
 
   // --- send helper (used by keyboard + buttons) ---
   function send(s){ wsSend(s); track(s); scheduleComplete(); }
 
   // --- completion chips ---
   var ct; function scheduleComplete(){ clearTimeout(ct); ct=setTimeout(reqComplete,140); }
-  function reqComplete(){ var t=curToken(); if(t===null){ chipsEl.innerHTML=''; return; } wsSend(String.fromCharCode(0,2)+t); }
+  function reqComplete(){ var t=curToken(); if(t===null){ chipsEl.innerHTML=''; chipsEl.style.display='none'; relayout(); return; } wsSend(String.fromCharCode(0,2)+t); }
   function renderChips(items){
     chipsEl.innerHTML='';
+    if(!items || !items.length){ chipsEl.style.display='none'; relayout(); return; }
+    chipsEl.style.display='flex';
+    // #assist is flex:0 0 auto and #term flex:1 1 auto: the chips row takes its
+    // height off the terminal's box, so the grid has to be re-fitted to it —
+    // otherwise the bottom rows (a TUI's prompt) drop out of the clipped box.
+    relayout();
     var t=curToken(); var base = t===null?'':t.split('/').pop();
     items.forEach(function(it){
       var name=it[0], isDir=it[1];
       var c=document.createElement('div'); c.className='chip'+(isDir?' d':''); c.textContent=name+(isDir?'/':'');
       bindTap(c, function(){
         var suffix = name.indexOf(base)===0 ? name.slice(base.length) : name;
-        suffix = suffix.replace(/ /g,'\\ ');
+        suffix = suffix.replace(/([ \t\n\r"'`$\\\(\)\[\]\{\}<>;*?#&|!~])/g, '\\$1');
         if(isDir) suffix += '/';
-        send(suffix); term.focus();
+        send(suffix);
+        // Completing a path is an explicit "I am typing" action, so the
+        // keyboard belongs up here (and on iOS the hidden textarea has to be
+        // focused directly for it to stay up).
+        focusTerm();
       });
       chipsEl.appendChild(c);
     });
@@ -1815,7 +1888,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
   // --- tab list from the desktop (drives the picker; the old strip is gone) ---
   function onTabs(items, active){
-    if(active!==lastActive){ try{term.reset();}catch(e){} curLine=''; chipsEl.innerHTML=''; lastActive=active; }
+    if(active!==lastActive){
+      // clear() wipes scrollback so old pane history does not bleed through
+      // when the user scrolls up after a tab switch.
+      try{term.clear();}catch(e){}
+      try{term.reset();}catch(e){}
+      curLine=''; chipsEl.innerHTML=''; lastActive=active;
+    }
     pickItems = items||[]; pickActive = active; renderPicker();
   }
 
@@ -1862,7 +1941,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         live ? '● live now' : (n + (n===1?' terminal':' terminals')),
         { on: live, fn: function(){ openTabGroup(gr); } }));
     });
-    var add=makeRow('+','New terminal','start a fresh shell',{ fn: function(){ wsSend(String.fromCharCode(0,4)); closePicker(); term.focus(); } });
+    var add=makeRow('+','New terminal','start a fresh shell',{ fn: function(){ wsSend(String.fromCharCode(0,4)); closePicker(); pickTerminalFocus(); } });
     add.className='pick-item add';
     pickList.appendChild(add);
     pickFoot.textContent = groups.length ? (groups.length + (groups.length===1?' tab':' tabs') + ' · ' + pickItems.length + ' terminal' + (pickItems.length===1?'':'s')) : '';
@@ -1878,14 +1957,23 @@ const INDEX_HTML: &str = r##"<!doctype html>
     });
     pickFoot.textContent = panes.length + (panes.length===1?' terminal':' terminals');
   }
+  function pickTerminalFocus(){
+    // Picking a terminal is not "I want to type": on a phone the keyboard would
+    // cover the pane that was just opened. It comes up on an input-box tap (or
+    // any key) instead.
+    if(!touchUI) focusTerm();
+  }
   function openTabGroup(gr){
     if(gr.panes.length===1){ chooseTerminal(gr.panes[0].id); return; }
     pickView='panes'; pickTab=gr.key; pickTabName=gr.name; renderPicker();
   }
   function chooseTerminal(id){
     if(id==null) return;
-    if(id!==pickActive){ pickActive=id; wsSend(String.fromCharCode(0,3)+id); }
-    closePicker(); term.focus(); renderPicker(); settle();
+    // Use string coercion for the comparison: JSON-parsed u64 IDs and the
+    // stored pickActive are both numbers but may differ in type after null
+    // transitions; String() comparison is safe for all values including null.
+    if(String(id)!==String(pickActive)){ pickActive=id; wsSend(String.fromCharCode(0,3)+id); }
+    closePicker(); pickTerminalFocus(); renderPicker(); settle();
   }
 
   // --- extra keys (Termux-style) ---
@@ -1898,22 +1986,30 @@ const INDEX_HTML: &str = r##"<!doctype html>
   // permanently disabling mouse clicks on hybrid devices.
   function bindTap(el, fn){
     var sx=0, sy=0, moved=false, lastTouch=0;
-    el.addEventListener('touchstart', function(e){ lastTouch=Date.now(); var t=e.touches[0]; sx=t.clientX; sy=t.clientY; moved=false; }, {passive:true});
-    el.addEventListener('touchmove', function(e){ var t=e.touches[0]; if(Math.abs(t.clientX-sx)>8 || Math.abs(t.clientY-sy)>8) moved=true; }, {passive:true});
+    el.addEventListener('touchstart', function(e){
+      if(e.touches.length!==1){ moved=true; return; }
+      lastTouch=Date.now(); var t=e.touches[0]; sx=t.clientX; sy=t.clientY; moved=false;
+    }, {passive:true});
+    el.addEventListener('touchmove', function(e){
+      if(e.touches.length!==1){ moved=true; return; }
+      var t=e.touches[0]; if(Math.abs(t.clientX-sx)>8 || Math.abs(t.clientY-sy)>8) moved=true;
+    }, {passive:true});
     el.addEventListener('touchend', function(e){ if(!moved){ e.preventDefault(); fn(); } }, {passive:false});
     el.addEventListener('mousedown', function(e){ if(Date.now()-lastTouch<700) return; e.preventDefault(); fn(); });
   }
   KEYS.forEach(function(k){
     var b=document.createElement('div'); b.className='key'; b.textContent=k[0];
     if(k[1]==='CTRL'){ ctrlBtn=b; bindTap(b,function(){ ctrlPending=!ctrlPending; b.classList.toggle('on',ctrlPending); }); }
-    else bindTap(b,function(){ send(k[1]); term.focus(); });
+    else bindTap(b,function(){ send(k[1]); focusTerm(); });
     keysEl.appendChild(b);
   });
 
   term.onData(function(d){
-    if(ctrlPending && d.length===1){
-      var code=d.toUpperCase().charCodeAt(0);
-      if(code>=64 && code<=95) d=String.fromCharCode(code & 0x1f);
+    if(ctrlPending){
+      if(d.length===1){
+        var code=d.toUpperCase().charCodeAt(0);
+        if(code>=64 && code<=95) d=String.fromCharCode(code & 0x1f);
+      }
       ctrlPending=false; if(ctrlBtn) ctrlBtn.classList.remove('on');
     }
     send(d);
@@ -1928,29 +2024,27 @@ const INDEX_HTML: &str = r##"<!doctype html>
   // synthesizes a left click — with no app owning the mouse, xterm's own
   // scrolling keeps the gesture and we stay out of its way. Horizontal swipes
   // still move the cursor with ←/→. Decide the axis on the first move, then
-  // lock it; `mouseActive()` below says whether the app owns the pointer.
+  // lock it; `mouseActive()` below says whether the app owns the pointer. A
+  // stationary tap decides the software keyboard either way — up only on the
+  // app's input line (see `onCaretLine`), down for a click on its own UI.
   (function(){
     var x0=0,y0=0,lastX=0,lastY=0,moved=false,mode=0,STEP=16;   // mode: 0=undecided,1=horizontal,2=vertical,-1=multi-touch
     function termTarget(){ return term.element || termEl; }
-    // Whether the running app owns the pointer. The desktop puts the session's
-    // modes back at the head of the replay it sends on attach (see set_modes in
-    // remote_server.rs), so this parser knows about them even though the app set
-    // them before this page ever connected.
-    function mouseActive(){
-      try{ return term.modes.mouseTrackingMode!=='none'; }catch(_){ return false; }
-    }
     function synthWheel(x,y,dy){
       try{ termTarget().dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,deltaY:dy,deltaMode:WheelEvent.DOM_DELTA_PIXEL})); }catch(_){}
     }
     function synthClick(x,y){
       var el=termTarget();
       try{ el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0,buttons:1})); }catch(_){}
-      try{ document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0,buttons:0})); }catch(_){}
+      try{ el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0,buttons:0})); }catch(_){}
     }
+    // Capture phase: with no app owning the mouse xterm cancels the touch
+    // (stopPropagation) for its own scrolling, which would otherwise keep these
+    // listeners from ever seeing a tap.
     termEl.addEventListener('touchstart',function(e){
       if(e.touches.length!==1){ mode=-1; return; }
       var t=e.touches[0]; x0=t.clientX; y0=t.clientY; lastX=t.clientX; lastY=t.clientY; moved=false; mode=0;
-    },{passive:true});
+    },{passive:true,capture:true});
     termEl.addEventListener('touchmove',function(e){
       if(mode===-1 || e.touches.length!==1) return;
       var t=e.touches[0], dx=t.clientX-x0, dy=t.clientY-y0;
@@ -1958,8 +2052,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
       if(mode===1){
         e.preventDefault(); moved=true;
         var d=t.clientX-lastX;
-        while(d>=STEP){ wsSend('\x1b[C'); lastX+=STEP; d-=STEP; }
-        while(d<=-STEP){ wsSend('\x1b[D'); lastX-=STEP; d+=STEP; }
+        // Use send() (not wsSend()) so curLine is updated on every
+        // horizontal swipe arrow — otherwise completion state drifts.
+        while(d>=STEP){ send('\x1b[C'); lastX+=STEP; d-=STEP; }
+        while(d<=-STEP){ send('\x1b[D'); lastX-=STEP; d+=STEP; }
       } else if(mode===2){
         moved=true;
         // When the app has not taken the mouse, xterm's own touch handling
@@ -1982,18 +2078,24 @@ const INDEX_HTML: &str = r##"<!doctype html>
     },{passive:false});
     termEl.addEventListener('touchend',function(e){
       if(mode===-1){ mode=0; return; }
+      var tap = mode===0 && !moved && e.touches.length===0 && e.changedTouches.length===1;
+      if(!tap){ mode=0; return; }
       // A stationary tap opens links / activates the app's own controls while
       // the app owns the mouse. preventDefault suppresses the delayed synthetic
       // mouse events browsers send after a tap, so it is not reported twice.
       // The click lands where the finger went *down*: a rolling tap moves a few
       // pixels before it lifts, and the point it happened to lift over is a cell
       // away often enough to hit the wrong control.
-      if(mode===0 && !moved && e.touches.length===0 && e.changedTouches.length===1 && mouseActive()){
+      if(mouseActive()){
         e.preventDefault();
         synthClick(x0,y0);
       }
+      // Either way the tap decides the keyboard: on the input line it means "I
+      // want to type", anywhere else it is a click on the app's UI (or a look at
+      // output) and the keyboard has to get out of the way.
+      if(onCaretLine(y0)) focusTerm(); else blurTerm();
       mode=0;
-    },{passive:false});
+    },{passive:false,capture:true});
   })();
 
   var overlay=$('overlay'), ovTitle=$('ov-title'), ovSub=$('ov-sub'), ovIcon=$('ov-icon');
@@ -2012,10 +2114,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
   function hideOverlay(){ overlay.style.display='none'; }
   var fatal=null; // a handshake refusal: shown instead of "connection lost"
   function connect(){
+    if(ws){
+      try {
+        ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null;
+        ws.close();
+      } catch(_) {}
+    }
+    clearInterval(pingTimer); pingTimer = null;
     closedByUser=false; fatal=null; ready=false; txh=rxh=null; hideOverlay(); msg.textContent='Connecting…';
     try{ term.reset(); }catch(e){}   // clear so the server's replay rebuilds cleanly
     curLine=''; lastActive=null;
     pickItems=[]; pickActive=null; pickView='tabs'; pickTab=null; pickTabName='';
+    measuredOnce = false;
     var serverId=null, deviceKey=null, nc=null;
     ws = new WebSocket(proto + '://' + location.host + '/ws');
     ws.binaryType = 'arraybuffer';
@@ -2048,6 +2158,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
           txh=new Half(s,0); rxh=new Half(s,1); ready=true;
           wsSend(new Uint8Array([0,5]));
           msg.innerHTML='<i class="dot"></i>Connected (encrypted)'; dc.style.display=''; settle(); openPicker();
+          // Keep the WebSocket alive through Cloudflare's ~100s idle timeout.
+          // Browsers cannot send raw WS pings; an empty text frame is ignored
+          // by the server's input_task (Text frames are skipped post-handshake)
+          // and costs nothing on the PTY side.
+          clearInterval(pingTimer);
+          pingTimer = setInterval(function(){ if(ws && ws.readyState===1) ws.send(''); }, 30000);
         } else if(m.t==='denied'){
           if(m.reason==='unknown'){ var a=loadCreds(); delete a[serverId]; saveCreds(a); fatal={title:'Device revoked', sub:"This device is no longer authorized. Scan the QR code shown by SpritX to pair it again.", retry:false}; }
           else if(m.reason==='pairing'){ var b=loadCreds(); if(b[serverId] && b[serverId].pending) delete b[serverId]; saveCreds(b); pairSecret=null; fatal={title:'QR code expired', sub:'This QR code expired or was already used. Show a new QR code in SpritX.', retry:false}; }
@@ -2064,13 +2180,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
       }
       term.write(plain.subarray(1));
     };
-    ws.onclose = function(){ ready=false; msg.textContent = closedByUser ? 'Disconnected' : fatal ? fatal.title : 'Connection lost'; dc.style.display='none'; showOverlay(fatal || (closedByUser ? 'user' : 'lost')); };
-    ws.onerror = function(){ msg.textContent='Erreur de connexion'; };
+    ws.onclose = function(){ clearInterval(pingTimer); pingTimer=null; ready=false; msg.textContent = closedByUser ? 'Disconnected' : fatal ? fatal.title : 'Connection lost'; dc.style.display='none'; showOverlay(fatal || (closedByUser ? 'user' : 'lost')); };
+    ws.onerror = function(){ msg.textContent='Connection error'; };
   }
-  dc.onclick = function(){ closedByUser = true; if(ws) ws.close(); };
-  backBtn.onclick = function(){ openPicker(); };
-  pickBack.onclick = function(){ pickView='tabs'; renderPicker(); };
-  $('pick-new').onclick = function(){ wsSend(String.fromCharCode(0,4)); };
+  bindTap(dc, function(){ closedByUser = true; if(ws) ws.close(); });
+  bindTap(backBtn, function(){ openPicker(); });
+  bindTap(pickBack, function(){ pickView='tabs'; renderPicker(); });
+  bindTap($('pick-new'), function(){ wsSend(String.fromCharCode(0,4)); closePicker(); pickTerminalFocus(); });
   function setFont(f){
     baseFont = Math.max(6, Math.min(24, Math.round(f*10)/10));
     term.options.fontSize = baseFont;
@@ -2080,48 +2196,44 @@ const INDEX_HTML: &str = r##"<!doctype html>
     // has re-measured the new cell size (a single fit can use stale metrics).
     layout(); settle();
   }
-  $('fdec').onclick = function(){ setFont(baseFont-1); };
-  $('finc').onclick = function(){ setFont(baseFont+1); };
-  $('reconnect').onclick = function(){ connect(); };
+  bindTap($('fdec'), function(){ setFont(baseFont-1); });
+  bindTap($('finc'), function(){ setFont(baseFont+1); });
+  bindTap($('reconnect'), function(){ connect(); });
   connect();
 
   function sendResize(){ wsSend(String.fromCharCode(0,1)+term.cols+'x'+term.rows); }
   function showDim(){ var d=$('dim'); if(d) d.textContent = term.cols+'×'+term.rows; }
-  // Measure the real glyph cell with a hidden span using the terminal's own
-  // font. fit.fit() relies on xterm's cached char metrics, which are captured
-  // before the monospace font is applied — it then reports more columns than
-  // fit, xterm paints wider than the DOM element says, and the right edge gets
-  // clipped (until a font-size change forces a re-measure). Measuring directly
-  // sidesteps the stale cache entirely.
-  var cellSpan = null;
-  function measureCell(){
-    if(!cellSpan){
-      cellSpan = document.createElement('span');
-      cellSpan.setAttribute('aria-hidden','true');
-      cellSpan.style.cssText = 'position:absolute;top:0;left:0;visibility:hidden;white-space:pre;pointer-events:none';
-      cellSpan.textContent = '0000000000';   // 10 cells for precision
-      termEl.appendChild(cellSpan);
-    }
-    cellSpan.style.fontFamily = term.options.fontFamily || 'monospace';
-    cellSpan.style.fontSize = (term.options.fontSize || 12) + 'px';
-    cellSpan.style.lineHeight = 'normal';
-    var r = cellSpan.getBoundingClientRect();
-    var w = r.width / 10;
-    return { w: w, h: r.height || w * 1.2 };
+  // The cell size xterm is *painting* with. It rounds the font's measured cell
+  // to whole device pixels (11px font at dpr 1.25: a 6.6×14 font cell becomes
+  // 8×18 device px = 6.4×14.4 CSS px), so no independent measurement of the
+  // font agrees with it: a hidden span reported 6.7×11 for that same grid. Both
+  // errors hurt, in opposite directions — too few columns (dead space at the
+  // right) and, because the row height was the bigger error, rows reaching past
+  // #term's bottom edge, clipped away exactly where a full-screen TUI keeps its
+  // prompt. FitAddon sizes from this same field.
+  function cellMetrics(){
+    try{
+      var c = term._core._renderService.dimensions.css.cell;
+      if (c && c.width > 0 && c.height > 0) return c;
+    }catch(e){}
+    return null;
   }
   function layout(){
     var vv = window.visualViewport;
     var h = vv ? vv.height : window.innerHeight, top = vv ? vv.offsetTop : 0;
     app.style.height = h + 'px'; app.style.transform = 'translateY(' + top + 'px)';
-    var cell = measureCell();
-    var availW = termEl.clientWidth - 4;
-    var availH = termEl.clientHeight;
-    if (cell.w > 0 && availW > 16) {
-      var cols = Math.max(2, Math.floor(availW / cell.w));
-      var rows = Math.max(1, Math.floor(availH / cell.h));
-      // Never let the painted width exceed the container (guards rounding).
-      while (cols > 2 && cols * cell.w > availW) cols--;
-      try{ term.resize(cols, rows); }catch(e){ try{ fit.fit(); }catch(_){} }
+    // Size the grid against the box xterm paints into (.xterm fills #term's
+    // content box) instead of rebuilding that box from innerWidth/innerHeight:
+    // cols/rows then land inside it by construction, so the last row and the
+    // last column are always the ones actually on screen.
+    var box = (term.element || termEl).getBoundingClientRect();
+    var cell = cellMetrics();
+    if (cell && box.width > 16 && box.height > 8) {
+      var cols = Math.max(2, Math.floor(box.width / cell.width));
+      var rows = Math.max(1, Math.floor(box.height / cell.height));
+      if (cols !== term.cols || rows !== term.rows) {
+        try{ term.resize(cols, rows); }catch(e){ try{ fit.fit(); }catch(_){} }
+      }
     } else {
       try{ fit.fit(); }catch(e){}
     }
@@ -2129,17 +2241,15 @@ const INDEX_HTML: &str = r##"<!doctype html>
     showDim();
   }
   var rt; function relayout(){ clearTimeout(rt); rt=setTimeout(layout,60); }
-  // The very first fit is often wrong: xterm measures its cell size before the
-  // monospace font is applied, so it reports more columns than fit the screen
-  // and the terminal overflows (content clipped at the right edge). Re-fit a
-  // few times as the font/layout settle, and whenever the terminal comes back
-  // into view. All calls are idempotent.
+  // xterm measures its glyph cell once, as early as `open()`, and holds that
+  // value until an option change makes it look again — a first measurement
+  // taken before the font is ready would size every later fit. Re-fit a few
+  // times as the font and the viewport settle. All calls are idempotent.
   function settle(){
     [0,80,220,500,1000,1800].forEach(function(d){ setTimeout(layout, d); });
-    // xterm takes its glyph-cell measurement before the monospace font is
-    // applied and keeps that stale width forever; a font-size change is what
-    // forces a fresh measure. Nudge it once so the renderer's metrics match the
-    // real font (this is exactly why tapping A−/A+ used to "fix" the layout).
+    // Setting fontFamily/fontSize back to the value they already have is what
+    // makes xterm re-measure (this is why tapping A−/A+ used to "fix" the
+    // layout); it does so without a visible change.
     if(!measuredOnce){
       measuredOnce = true;
       setTimeout(function(){

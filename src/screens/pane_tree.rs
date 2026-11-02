@@ -763,11 +763,20 @@ fn render_live_terminal(
     }
 
     // Pane-aware PTY sizing: measure the body's pixel box during prepaint
-    // and resize the session on the next deferred frame.
+    // and resize the session on the next deferred frame. Skipped while a remote
+    // client is attached — its Resize input already sized the PTY for its own
+    // screen, and re-asserting the box here would hand the client a grid taller
+    // than the one it can draw (its bottom rows, where a TUI keeps its prompt,
+    // are then unreachable). The last client leaving changes the status stamp,
+    // which repaints this pane and lets it take its size back.
+    let remote_driven = app.remote_clients() > 0;
     let (cur_cols, cur_rows) = session.size();
     body = body.child(
         canvas(
             move |bounds, window, cx| {
+                if remote_driven {
+                    return;
+                }
                 let width = f32::from(bounds.size.width) - 2.0 * f32::from(term_pad_x()) - 2.0;
                 let height = f32::from(bounds.size.height) - 2.0 * f32::from(term_pad_y());
                 if width <= 0.0 || height <= 0.0 {

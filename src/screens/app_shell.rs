@@ -1993,6 +1993,18 @@ impl SpritXApp {
         }
     }
 
+    /// Attached remote clients right now. While one is attached, that client's
+    /// terminal size *is* the pane's PTY size (its `Resize` inputs land in
+    /// [`SpritXApp::pump_terminals`]), so the pane's own pixel box must not
+    /// resize the session back: the client would then paint a crop and a phone
+    /// would lose the bottom rows — where a full-screen TUI keeps its prompt.
+    pub fn remote_clients(&self) -> usize {
+        self.remote_server
+            .as_ref()
+            .map(RemoteServer::client_count)
+            .unwrap_or(0)
+    }
+
     /// Start the HTTP/WebSocket server on the configured port and open a
     /// single-use pairing code.
     pub fn remote_start(&mut self, cx: &mut Context<Self>) {

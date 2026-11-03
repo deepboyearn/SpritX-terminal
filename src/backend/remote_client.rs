@@ -304,6 +304,7 @@ impl LinkState {
         if let Ok(mut error) = self.error.lock() {
             *error = Some(message.to_string());
         }
+        signal_client_wake();
     }
 
     fn set_online(&self, server_id: String, server_name: String) {
@@ -569,7 +570,14 @@ async fn pump(session: &mut Session, state: &Arc<LinkState>, commands: &mut mpsc
                     }
                 }
                 Some(Ok(Message::Pong(_))) => last_inbound = Instant::now(),
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(Message::Close(frame))) => {
+                    if frame.as_ref().is_some_and(|f| f.reason == "Sharing stopped") {
+                        state.closing.store(true, Ordering::Relaxed);
+                    }
+                    state.set_error("the remote connection closed");
+                    return;
+                }
+                Some(Err(_)) | None => return,
                 Some(Ok(_)) => {}
             },
             command = commands.recv() => {

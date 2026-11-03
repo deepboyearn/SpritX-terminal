@@ -683,6 +683,44 @@ fn revoke_cuts_a_live_connection() {
 }
 
 #[test]
+fn stop_sends_an_immediate_explicit_close_to_every_client() {
+    let harness = Harness::start("stop_close_frame");
+    let (mut first, mut a, _) = harness.pair_and_connect("one");
+    harness.accept_attach(&mut first, &mut a);
+    harness.server.new_pairing();
+    let (mut second, mut b, _) = harness.pair_and_connect("two");
+    harness.accept_attach(&mut second, &mut b);
+    let start = Instant::now();
+    harness.server.stop();
+    assert!(start.elapsed() < Duration::from_millis(100), "stop blocked the caller");
+    for client in [&mut first, &mut second] {
+        client.socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let head = client.read_exact(2).expect("prompt close frame, not an abrupt EOF");
+        assert_eq!(head[0] & 0x0f, 8);
+        let payload = client.read_exact((head[1] & 0x7f) as usize).unwrap();
+        assert_eq!(&payload[..2], &1001u16.to_be_bytes());
+        assert_eq!(&payload[2..], b"Sharing stopped");
+    }
+    assert!(harness.server.take_inputs().is_empty());
+}
+
+#[test]
+fn stop_cancels_a_client_waiting_in_the_handshake() {
+    let harness = Harness::start("stop_handshake");
+    let mut client = WsClient::connect(harness.server.port());
+    client.expect_server_hello();
+    client.socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+    harness.server.stop();
+    // An idle unauthenticated client must not wait for the handshake timeout.
+    let mut byte = [0];
+    match client.socket.read(&mut byte) {
+        Ok(0) => {},
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => {},
+        other => panic!("handshake did not close immediately: {other:?}"),
+    }
+}
+
+#[test]
 fn stop_cuts_live_connections_and_clears_pairing() {
     let harness = Harness::start("stop");
     let port = harness.server.port();

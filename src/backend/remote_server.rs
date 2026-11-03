@@ -418,6 +418,9 @@ impl RemoteServer {
                 Ok(runtime) => runtime,
                 Err(_) => return,
             };
+            runtime.running = false;
+            runtime.port = 0;
+            runtime.tunnel_requested = false;
             (
                 runtime.shutdown.take(),
                 runtime.kill.take(),
@@ -432,7 +435,16 @@ impl RemoteServer {
             let _ = kill.send(());
         }
         if let Some(child) = tunnel {
-            reap(child);
+            // Let the close frame reach the peer before removing its transport.
+            // Never wait for a network client on the GPUI event loop.
+            let state = Arc::clone(&self.state);
+            std::thread::spawn(move || {
+                let until = Instant::now() + Duration::from_millis(150);
+                while state.clients.load(Ordering::Relaxed) > 0 && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                reap(child);
+            });
         }
         *self.state.public_base.lock().expect("public base lock") = None;
         if let Ok(mut handshake) = self.state.handshake.lock() {
@@ -1033,13 +1045,16 @@ impl Drop for ClientGuard<'_> {
 /// Run one client: handshake, then bridge its pane.
 async fn bridge(socket: WebSocket, state: Arc<ServerState>) {
     let (mut sink, mut stream) = socket.split();
-    let global_kill = state.runtime_kill();
+    let mut global_kill = state.runtime_kill();
     let session = {
         let timeout = state.options.handshake_timeout;
-        match tokio::time::timeout(timeout, handshake(&mut sink, &mut stream, &state)).await {
-            Ok(Some(session)) => session,
-            Ok(None) => return,
-            Err(_) => return, // handshake timed out
+        tokio::select! {
+            biased;
+            _ = global_kill.recv() => return,
+            result = tokio::time::timeout(timeout, handshake(&mut sink, &mut stream, &state)) => match result {
+                Ok(Some(session)) => session,
+                _ => return,
+            }
         }
     };
     let _clients = ClientGuard::new(&state);
@@ -1074,6 +1089,7 @@ async fn bridge(socket: WebSocket, state: Arc<ServerState>) {
         out_rx,
         session.tx,
         pending_replay,
+        global_kill.resubscribe(),
     ));
     let mut reader = tokio::spawn(input_task(
         stream,
@@ -1088,7 +1104,14 @@ async fn bridge(socket: WebSocket, state: Arc<ServerState>) {
         _ = &mut writer => reader.abort(),
         _ = &mut reader => writer.abort(),
         _ = kill_conn.recv() => { writer.abort(); reader.abort(); }
-        _ = global.recv() => { writer.abort(); reader.abort(); }
+        _ = global.recv() => {
+            reader.abort();
+            // The writer owns the socket and sends the close frame. Bound the
+            // flush so a stalled peer cannot retain a bridge indefinitely.
+            if tokio::time::timeout(Duration::from_millis(100), &mut writer).await.is_err() {
+                writer.abort();
+            }
+        }
     }
     state.conns.lock().expect("conns lock").remove(&conn_id);
 }
@@ -1097,6 +1120,26 @@ async fn bridge(socket: WebSocket, state: Arc<ServerState>) {
 /// so the per-direction nonce counter cannot interleave.
 async fn output_task(
     mut sink: WsSink,
+    view_rx: watch::Receiver<ConnView>,
+    out_rx: mpsc::Receiver<OutMsg>,
+    tx: Half,
+    pending_replay: Arc<Mutex<Vec<u8>>>,
+    mut stop: broadcast::Receiver<()>,
+) {
+    tokio::select! {
+        biased;
+        _ = stop.recv() => {},
+        _ = output_frames(&mut sink, view_rx, out_rx, tx, pending_replay) => return,
+    }
+    let close = Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: 1001,
+        reason: "Sharing stopped".into(),
+    }));
+    let _ = tokio::time::timeout(Duration::from_millis(75), sink.send(close)).await;
+}
+
+async fn output_frames(
+    mut sink: &mut WsSink,
     mut view_rx: watch::Receiver<ConnView>,
     mut out_rx: mpsc::Receiver<OutMsg>,
     mut tx: Half,
@@ -1336,6 +1379,9 @@ impl ServerState {
     }
 
     fn push_input(&self, input: RemoteInput) {
+        // Serialize the access check with stop(), before touching the queue.
+        let Ok(runtime) = self.runtime.lock() else { return; };
+        if !runtime.running { return; }
         if let Ok(mut queue) = self.inputs.lock() {
             queue.push(input);
         }
@@ -2181,7 +2227,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
       }
       term.write(plain.subarray(1));
     };
-    ws.onclose = function(){ clearInterval(pingTimer); pingTimer=null; ready=false; msg.textContent = closedByUser ? 'Disconnected' : fatal ? fatal.title : 'Connection lost'; dc.style.display='none'; showOverlay(fatal || (closedByUser ? 'user' : 'lost')); };
+    ws.onclose = function(event){ if(event && event.reason==='Sharing stopped'){ fatal={title:'Sharing stopped', sub:'The desktop stopped remote control.', retry:true}; } clearInterval(pingTimer); pingTimer=null; ready=false; msg.textContent = closedByUser ? 'Disconnected' : fatal ? fatal.title : 'Connection lost'; dc.style.display='none'; showOverlay(fatal || (closedByUser ? 'user' : 'lost')); };
     ws.onerror = function(){ msg.textContent='Connection error'; };
   }
   bindTap(dc, function(){ closedByUser = true; if(ws) ws.close(); });

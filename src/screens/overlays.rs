@@ -1608,7 +1608,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         cx.listener(|this, _, _, cx| {
                             this.settings.font_family =
                                 "JetBrainsMono Nerd Font, monospace".into();
-                            this.settings.font_size = 12.0;
+                            this.settings.font_size = 8.0;
                             this.settings.cursor_blink = true;
                             this.settings.cursor_style = "Block";
                             this.settings.scrollback = 5_000;

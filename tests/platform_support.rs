@@ -206,6 +206,21 @@ mod windows {
     }
 
     #[test]
+    fn prompt_reuses_trailing_blank_rows_without_overwriting_output() {
+        let script = format!(
+            "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n{}\n[Console]::Write(\"KEEP_ONE`r`nKEEP_TWO`r`n`r`n`r`n\"); [Console]::Write((prompt)); Start-Sleep -Milliseconds 300",
+            include_str!("../assets/shell/spritx-shell-init.ps1"),
+        );
+        let mut session = powershell(&script);
+        assert!(session.wait_for_text("❯", Duration::from_secs(15)), "{}", session.screen_text());
+        let lines = session.visible_lines();
+        let last_output = lines.iter().position(|line| line.contains("KEEP_TWO")).unwrap();
+        assert!(lines.iter().any(|line| line.contains("KEEP_ONE")));
+        assert!(!lines[last_output + 1].trim().is_empty(), "extra blank rows before prompt: {lines:?}");
+        assert!(lines[last_output + 2].contains("❯"), "typing row must follow header: {lines:?}");
+    }
+
+    #[test]
     fn powershell_prompt_reports_the_real_working_directory() {
         let script = format!(
             "{}\n$null = prompt; [Console]::WriteLine('DONE')",

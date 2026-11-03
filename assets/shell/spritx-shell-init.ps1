@@ -51,8 +51,32 @@ if (-not $global:SpritXPromptEnabled) {
         }
         return $bar + $e + '[0m'
     }
+    function global:Compress-SpritXPromptGap {
+        # PowerShell's table formatter leaves trailing empty rows. Reuse at most
+        # two of those rows; never move across text or unfinished inline output.
+        try {
+            $raw = $Host.UI.RawUI
+            $position = $raw.CursorPosition
+            if ($position.X -ne 0) { return }
+            $width = $raw.BufferSize.Width
+            for ($i = 0; $i -lt 2 -and $position.Y -gt 0; $i++) {
+                $rect = [Management.Automation.Host.Rectangle]::new(0, $position.Y - 1, $width - 1, $position.Y - 1)
+                $cells = $raw.GetBufferContents($rect)
+                $empty = $true
+                foreach ($cell in $cells) {
+                    if ($cell.Character -ne [char]0 -and -not [char]::IsWhiteSpace($cell.Character)) { $empty = $false; break }
+                }
+                if (-not $empty) { break }
+                $position.Y--
+                $raw.CursorPosition = $position
+            }
+        } catch {
+            # Some non-console hosts do not expose their buffer; leave it alone.
+        }
+    }
     function global:prompt {
         $succeeded = $?
+        Compress-SpritXPromptGap
         $e = [string][char]27
         $location = Get-Location
         if ($location.Provider.Name -eq 'FileSystem') {

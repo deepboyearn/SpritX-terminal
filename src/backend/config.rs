@@ -51,6 +51,9 @@ impl AppConfig {
 pub struct AppearanceConfig {
     pub font_family: String,
     pub font_size: u16,
+    /// Marks configs written after the terminal default changed to 8px.
+    #[serde(default = "legacy_font_size_version")]
+    pub font_size_version: u8,
     pub cursor_blink: bool,
     /// `"block" | "bar" | "underline"`.
     pub cursor_style: String,
@@ -66,11 +69,31 @@ impl Default for AppearanceConfig {
                 r#""JetBrainsMonoNL Nerd Font Mono", "JetBrainsMonoNL NFM", "JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace"#
                     .to_string(),
             font_size: 8,
+            font_size_version: 1,
             cursor_blink: true,
             cursor_style: "block".to_string(),
             scrollback: 5000,
             theme: ThemeConfig::default(),
         }
+    }
+}
+
+fn legacy_font_size_version() -> u8 {
+    0
+}
+
+impl AppearanceConfig {
+    /// Older releases persisted their 14px and 12px defaults. Upgrade those
+    /// values once, then keep later choices made in Settings (including 14px).
+    fn migrate_font_size(&mut self) -> bool {
+        if self.font_size_version != 0 {
+            return false;
+        }
+        if matches!(self.font_size, 12 | 14) {
+            self.font_size = 8;
+        }
+        self.font_size_version = 1;
+        true
     }
 }
 
@@ -308,7 +331,16 @@ pub fn load() -> AppConfig {
         }
         return config;
     }
-    load_from(&path)
+    let mut config = load_from(&path);
+    if config.appearance.migrate_font_size() {
+        if let Err(error) = save_to(&path, &config) {
+            eprintln!(
+                "[spritx] could not save font size migration at {}: {error}",
+                path.display()
+            );
+        }
+    }
+    config
 }
 
 /// Load from an explicit path (no default-file creation).
@@ -406,6 +438,7 @@ mod tests {
     fn defaults_match_original() {
         let c = AppConfig::default();
         assert_eq!(c.appearance.font_size, 8);
+        assert_eq!(c.appearance.font_size_version, 1);
         assert_eq!(c.appearance.scrollback, 5000);
         assert_eq!(c.appearance.theme.background, "#1e1e2e");
         assert!(!c.behavior.focus_follows_mouse);
@@ -420,6 +453,29 @@ mod tests {
         assert!(c.history.enabled);
         assert!(c.history.ignore.contains(&"*token*".to_string()));
         assert!(c.keybindings.is_empty());
+    }
+
+    #[test]
+    fn legacy_default_font_sizes_migrate_once() {
+        for old_size in [12, 14] {
+            let body = format!("[appearance]\nfontSize = {old_size}\n");
+            let mut config: AppConfig = toml::from_str(&body).unwrap();
+            assert_eq!(config.appearance.font_size_version, 0);
+            assert!(config.appearance.migrate_font_size());
+            assert_eq!(config.appearance.font_size, 8);
+            assert!(!config.appearance.migrate_font_size());
+
+            // A later user choice of 14px must survive a save and reload.
+            config.appearance.font_size = 14;
+            let saved = toml::to_string(&config).unwrap();
+            let mut reloaded: AppConfig = toml::from_str(&saved).unwrap();
+            assert!(!reloaded.appearance.migrate_font_size());
+            assert_eq!(reloaded.appearance.font_size, 14);
+        }
+
+        let mut custom: AppConfig = toml::from_str("[appearance]\nfontSize = 18\n").unwrap();
+        assert!(custom.appearance.migrate_font_size());
+        assert_eq!(custom.appearance.font_size, 18);
     }
 
     #[test]

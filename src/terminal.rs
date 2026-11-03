@@ -811,6 +811,7 @@ impl TerminalSession {
     /// changes. Idle repaints (a click, the caret blink) hit the cache and do
     /// no per-cell work at all.
     pub fn grid_text(&self, theme_fg: Hsla, theme_bg: Hsla) -> (String, Vec<TextRun>) {
+        let _mem = crate::memprof::scope(crate::memprof::Region::GridCache);
         let appearance = appearance();
         let screen = self.parser.screen();
         let (rows_nz, cols_nz) = screen.size();
@@ -1087,6 +1088,15 @@ impl TerminalSession {
         spawn_reader(reader, pending.clone(), dirty.clone());
         spawn_reaper(child, exit_code.clone());
 
+        let parser = {
+            let _mem = crate::memprof::scope(crate::memprof::Region::Scrollback);
+            vt100::Parser::new(
+                NonZeroU16::new(rows).expect("rows > 0"),
+                NonZeroU16::new(cols).expect("cols > 0"),
+                appearance().scrollback.max(1),
+            )
+        };
+
         Ok(Self {
             backend: SessionBackend::Local(LocalPty {
                 writer: Arc::new(Mutex::new(writer)),
@@ -1095,11 +1105,7 @@ impl TerminalSession {
                 exit_code: exit_code.clone(),
                 pid,
             }),
-            parser: vt100::Parser::new(
-                NonZeroU16::new(rows).expect("rows > 0"),
-                NonZeroU16::new(cols).expect("cols > 0"),
-                appearance().scrollback.max(1),
-            ),
+            parser,
             pending,
             dirty,
             cols,
@@ -1117,13 +1123,17 @@ impl TerminalSession {
     pub fn attach_remote(link: Arc<crate::backend::remote_client::RemoteLink>) -> Self {
         let (pending, dirty) = link.output_buffers();
         let (cols, rows) = (80, 24);
-        Self {
-            backend: SessionBackend::Remote(RemotePane { link }),
-            parser: vt100::Parser::new(
+        let parser = {
+            let _mem = crate::memprof::scope(crate::memprof::Region::Scrollback);
+            vt100::Parser::new(
                 NonZeroU16::new(rows).expect("rows > 0"),
                 NonZeroU16::new(cols).expect("cols > 0"),
                 appearance().scrollback.max(1),
-            ),
+            )
+        };
+        Self {
+            backend: SessionBackend::Remote(RemotePane { link }),
+            parser,
             pending,
             dirty,
             cols,
@@ -1447,6 +1457,7 @@ fn spawn_reader(
                     Ok(0) => break,
                     Ok(n) => {
                         let got = std::time::Instant::now();
+                        let _mem = crate::memprof::scope(crate::memprof::Region::Pending);
                         let mut pending = pending.lock().expect("pending lock");
                         pending.extend_from_slice(&buf[..n]);
                         if pending.len() > MAX_PENDING {

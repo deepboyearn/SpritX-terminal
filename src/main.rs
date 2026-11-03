@@ -1,9 +1,14 @@
 use gpui::{App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size};
 
 use spritx_terminal::assets::Assets;
+use spritx_terminal::memprof;
 use spritx_terminal::screens::app_shell::SpritXApp;
 
 fn main() {
+    // Must be the first call so the reporter thread and the counting global
+    // allocator are live before the app builds any of its heavy buffers.
+    memprof::init();
+
     Application::new()
         .with_assets(Assets)
         .run(|cx: &mut App| {
@@ -26,4 +31,6 @@ fn main() {
                 .detach();
             }
         });
+
+    memprof::report_now();
 }

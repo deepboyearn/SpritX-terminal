@@ -2098,7 +2098,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                     div()
                                         .text_size(px(12.))
                                         .text_color(theme.fg_dim)
-                                        .child("Version 1.5.1 · GPUI port 0.2.2"),
+                                        .child(concat!("Version ", env!("CARGO_PKG_VERSION"))),
                                 )
                                 .child(
                                     div()
@@ -2106,75 +2106,6 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                         .text_color(theme.fg_dim)
                                         .child("MIT licensed · no account, no telemetry"),
                                 ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .p(px(12.))
-                        .rounded(px(8.))
-                        .bg(theme.bg_soft)
-                        .border_1()
-                        .border_color(theme.border)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(7.))
-                                        .child(icon(
-                                            if app.update_available {
-                                                Icon::Download
-                                            } else {
-                                                Icon::Check
-                                            },
-                                            14.0,
-                                            if app.update_available {
-                                                theme.accent
-                                            } else {
-                                                theme.success
-                                            },
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_size(px(12.5))
-                                                .text_color(theme.fg)
-                                                .child(if app.update_available {
-                                                    "SpritX 1.5.2 is available."
-                                                } else {
-                                                    "You’re up to date."
-                                                }),
-                                        ),
-                                )
-                                .child(if app.update_available {
-                                    primary_button("about-install", "Install and restart", &theme)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.update_available = false;
-                                            this.show_toast(
-                                                "Downloading update… SpritX will restart",
-                                                cx,
-                                            );
-                                        }))
-                                        .into_any_element()
-                                } else {
-                                    text_button("about-check", "Check for updates", &theme)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_toast("You’re up to date (1.5.1)", cx);
-                                        }))
-                                        .into_any_element()
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(theme.fg_dim)
-                                .child("Updates are signed AppImages; SpritX checks once at startup."),
                         ),
                 )
                 .child(

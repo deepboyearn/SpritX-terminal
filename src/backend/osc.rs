@@ -78,6 +78,7 @@ impl OscParser {
     }
 
     pub fn feed(&mut self, data: &[u8]) -> FeedResult {
+        let _mem = crate::memprof::scope(crate::memprof::Region::Osc);
         let mut passthrough = Vec::with_capacity(data.len());
         let mut events = Vec::new();
         let mut i = 0;
@@ -458,6 +459,7 @@ impl BlockTracker {
     }
 
     fn complete(&mut self, exit_code: Option<i32>) {
+        let _mem = crate::memprof::scope(crate::memprof::Region::Osc);
         if let Some(block) = self.build_block(exit_code) {
             self.completed.push(block);
         }

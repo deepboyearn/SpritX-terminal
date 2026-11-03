@@ -110,7 +110,6 @@ pub struct SpritXApp {
     /// Whether the 16 ANSI swatches are expanded in Appearance.
     pub ansi_open: bool,
     pub recording_action: Option<String>,
-    pub update_available: bool,
     pub tab_scroll: ScrollHandle,
     pub tab_menu: Option<TabMenuState>,
     pub pane_menu: Option<PaneMenuState>,
@@ -182,7 +181,6 @@ impl SpritXApp {
             settings_fonts: Vec::new(),
             ansi_open: false,
             recording_action: None,
-            update_available: true,
             tab_scroll: ScrollHandle::new(),
             tab_menu: None,
             pane_menu: None,

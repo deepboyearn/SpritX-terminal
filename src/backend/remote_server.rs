@@ -517,6 +517,7 @@ impl RemoteServer {
         if bytes.is_empty() {
             return;
         }
+        let _mem = crate::memprof::scope(crate::memprof::Region::Remote);
         let limit = self.state.options.replay_bytes;
         if limit > 0 {
             let mut replay = self.state.replay.lock().expect("replay lock");

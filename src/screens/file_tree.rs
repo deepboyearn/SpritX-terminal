@@ -155,6 +155,7 @@ fn load_children(
     level: usize,
     budget: &mut usize,
 ) -> Result<DirLoad, String> {
+    let _mem = crate::memprof::scope(crate::memprof::Region::FileTree);
     let entries = read_dir(dir, show_hidden)?;
     let mut nodes = Vec::new();
     let mut truncated = false;
@@ -372,6 +373,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Unknown directory".to_string());
 
+    let _mem = crate::memprof::scope(crate::memprof::Region::FileTree);
     let tree = match root.as_deref() {
         Some(root) if !loading => Some(cached_tree(root, ui.show_hidden, ui.refresh, &ui.expanded)),
         _ => None,

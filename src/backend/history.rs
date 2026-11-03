@@ -291,6 +291,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 fn read_lines_bounded(path: &Path) -> Vec<String> {
+    let _mem = crate::memprof::scope(crate::memprof::Region::History);
     let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };

@@ -65,7 +65,7 @@ impl Default for AppearanceConfig {
             font_family:
                 r#""JetBrainsMonoNL Nerd Font Mono", "JetBrainsMonoNL NFM", "JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace"#
                     .to_string(),
-            font_size: 14,
+            font_size: 12,
             cursor_blink: true,
             cursor_style: "block".to_string(),
             scrollback: 5000,
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn defaults_match_original() {
         let c = AppConfig::default();
-        assert_eq!(c.appearance.font_size, 14);
+        assert_eq!(c.appearance.font_size, 12);
         assert_eq!(c.appearance.scrollback, 5000);
         assert_eq!(c.appearance.theme.background, "#1e1e2e");
         assert!(!c.behavior.focus_follows_mouse);
@@ -473,7 +473,7 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "this is not = valid toml [[[").unwrap();
         let loaded = load_from(&path);
-        assert_eq!(loaded.appearance.font_size, 14);
+        assert_eq!(loaded.appearance.font_size, 12);
         assert!(!path.exists());
         assert!(dir.join("config.toml.broken").exists());
         let _ = std::fs::remove_dir_all(&dir);

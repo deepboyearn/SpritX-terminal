@@ -508,7 +508,7 @@ impl Default for SettingsData {
     fn default() -> Self {
         Self {
             font_family: "JetBrainsMono Nerd Font".into(),
-            font_size: 14.0,
+            font_size: 12.0,
             cursor_blink: true,
             cursor_style: "Block",
             scrollback: 5_000,

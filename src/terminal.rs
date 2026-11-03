@@ -265,7 +265,7 @@ impl Default for TerminalAppearance {
     fn default() -> Self {
         Self {
             font_family: SharedString::from(crate::theme::MONO_FONT),
-            font_size: 13.0,
+            font_size: 11.0,
             scrollback: DEFAULT_SCROLLBACK,
             cursor_shape: CursorShape::Block,
             cursor_blink: true,

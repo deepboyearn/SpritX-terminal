@@ -1634,7 +1634,7 @@ impl Render for SpritXApp {
                     return;
                 }
                 if this.modal.is_none() && cmd && key == "0" {
-                    this.settings.font_size = 8.0;
+                    this.settings.font_size = 11.0;
                     this.save_settings();
                     cx.notify();
                     cx.stop_propagation();

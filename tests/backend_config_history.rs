@@ -219,7 +219,7 @@ fn config_broken_file_is_backed_up_and_defaults_load() {
     let path = dir.join("config.toml");
     std::fs::write(&path, "[[[ not toml").unwrap();
     let loaded = config::load_from(&path);
-    assert_eq!(loaded.appearance.font_size, 8);
+    assert_eq!(loaded.appearance.font_size, 11);
     assert!(dir.join("config.toml.broken").exists());
     assert!(!path.exists());
     let _ = std::fs::remove_dir_all(&dir);

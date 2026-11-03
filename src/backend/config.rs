@@ -51,7 +51,7 @@ impl AppConfig {
 pub struct AppearanceConfig {
     pub font_family: String,
     pub font_size: u16,
-    /// Marks configs written after the terminal default changed to 8px.
+    /// Tracks one-time updates to the terminal's requested default size.
     #[serde(default = "legacy_font_size_version")]
     pub font_size_version: u8,
     pub cursor_blink: bool,
@@ -68,8 +68,8 @@ impl Default for AppearanceConfig {
             font_family:
                 r#""JetBrainsMonoNL Nerd Font Mono", "JetBrainsMonoNL NFM", "JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace"#
                     .to_string(),
-            font_size: 8,
-            font_size_version: 1,
+            font_size: 11,
+            font_size_version: 2,
             cursor_blink: true,
             cursor_style: "block".to_string(),
             scrollback: 5000,
@@ -83,16 +83,18 @@ fn legacy_font_size_version() -> u8 {
 }
 
 impl AppearanceConfig {
-    /// Older releases persisted their 14px and 12px defaults. Upgrade those
-    /// values once, then keep later choices made in Settings (including 14px).
+    /// Upgrade prior default sizes to 11px, while keeping custom choices and
+    /// subsequent changes made in Settings.
     fn migrate_font_size(&mut self) -> bool {
-        if self.font_size_version != 0 {
+        if self.font_size_version >= 2 {
             return false;
         }
-        if matches!(self.font_size, 12 | 14) {
-            self.font_size = 8;
+        if (self.font_size_version == 0 && matches!(self.font_size, 8 | 12 | 14))
+            || (self.font_size_version == 1 && self.font_size == 8)
+        {
+            self.font_size = 11;
         }
-        self.font_size_version = 1;
+        self.font_size_version = 2;
         true
     }
 }
@@ -437,8 +439,8 @@ mod tests {
     #[test]
     fn defaults_match_original() {
         let c = AppConfig::default();
-        assert_eq!(c.appearance.font_size, 8);
-        assert_eq!(c.appearance.font_size_version, 1);
+        assert_eq!(c.appearance.font_size, 11);
+        assert_eq!(c.appearance.font_size_version, 2);
         assert_eq!(c.appearance.scrollback, 5000);
         assert_eq!(c.appearance.theme.background, "#1e1e2e");
         assert!(!c.behavior.focus_follows_mouse);
@@ -457,12 +459,12 @@ mod tests {
 
     #[test]
     fn legacy_default_font_sizes_migrate_once() {
-        for old_size in [12, 14] {
+        for old_size in [8, 12, 14] {
             let body = format!("[appearance]\nfontSize = {old_size}\n");
             let mut config: AppConfig = toml::from_str(&body).unwrap();
             assert_eq!(config.appearance.font_size_version, 0);
             assert!(config.appearance.migrate_font_size());
-            assert_eq!(config.appearance.font_size, 8);
+            assert_eq!(config.appearance.font_size, 11);
             assert!(!config.appearance.migrate_font_size());
 
             // A later user choice of 14px must survive a save and reload.
@@ -476,6 +478,13 @@ mod tests {
         let mut custom: AppConfig = toml::from_str("[appearance]\nfontSize = 18\n").unwrap();
         assert!(custom.appearance.migrate_font_size());
         assert_eq!(custom.appearance.font_size, 18);
+
+        let mut previous: AppConfig = toml::from_str(
+            "[appearance]\nfontSize = 8\nfontSizeVersion = 1\n",
+        )
+        .unwrap();
+        assert!(previous.appearance.migrate_font_size());
+        assert_eq!(previous.appearance.font_size, 11);
     }
 
     #[test]
@@ -529,7 +538,7 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "this is not = valid toml [[[").unwrap();
         let loaded = load_from(&path);
-        assert_eq!(loaded.appearance.font_size, 8);
+        assert_eq!(loaded.appearance.font_size, 11);
         assert!(!path.exists());
         assert!(dir.join("config.toml.broken").exists());
         let _ = std::fs::remove_dir_all(&dir);

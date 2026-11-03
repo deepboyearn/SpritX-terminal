@@ -8,7 +8,7 @@ use spritx_terminal::terminal::{self, CursorShape, TerminalAppearance};
 fn appearance_is_configurable_and_scales_line_height() {
     // Defaults are the previous fixed values (13px / 19px line, block caret).
     let default = TerminalAppearance::default();
-    assert_eq!(default.font_size, 13.0);
+    assert_eq!(default.font_size, 11.0);
     assert_eq!(default.cursor_shape, CursorShape::Block);
     assert!(default.cursor_blink);
     assert_eq!(default.scrollback, terminal::DEFAULT_SCROLLBACK);

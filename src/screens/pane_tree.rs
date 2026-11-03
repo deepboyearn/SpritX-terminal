@@ -684,6 +684,7 @@ fn render_live_terminal(
         .flex_1()
         .min_h_0()
         .relative()
+        .cursor(CursorStyle::IBeam)
         .overflow_hidden()
         .px(term_pad_x())
         .py(term_pad_y())

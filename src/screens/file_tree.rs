@@ -5,8 +5,8 @@
 //! real filesystem through [`crate::backend::files`], rooted at the active
 //! pane's cwd (falling back to the process cwd, then `$HOME`).
 //!
-//! Expansion, hidden-file and context-menu state have no dedicated app fields,
-//! so they are encoded in the unused `SpritXApp::recording_action` string slot.
+//! Expansion, hidden-file and context-menu state use a dedicated app slot,
+//! separate from shortcut recording.
 //! The loaded directory tree is cached in a module-level slot and only rebuilt
 //! when the root, hidden toggle, refresh counter or expansion set changes, so
 //! rendering a frame never touches the filesystem.
@@ -47,7 +47,7 @@ struct FtUi {
 }
 
 fn ft_ui(app: &SpritXApp) -> FtUi {
-    let Some(raw) = app.recording_action.as_deref() else {
+    let Some(raw) = app.file_tree_ui.as_deref() else {
         return FtUi::default();
     };
     let mut parts = raw.split(FT_SEP);
@@ -261,16 +261,20 @@ fn root_title(root: &Path) -> String {
         .unwrap_or_else(|| root.to_string_lossy().into_owned())
 }
 
-fn shell_quote(path: &str) -> String {
-    let safe = !path.is_empty()
-        && path
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-+@:=%,~".contains(c));
-    if safe {
-        path.to_string()
-    } else {
-        format!("'{}'", path.replace('\'', "'\\''"))
+fn active_shell_kind(app: &SpritXApp) -> crate::platform::ShellKind {
+    if let Some(kind) = app.sessions.get(&app.active_tab().active_leaf).and_then(|s| s.shell_kind()) {
+        return kind;
     }
+    let program = if crate::platform::is_default_shell(&app.settings.shell_program) {
+        crate::platform::default_shell()
+    } else {
+        app.settings.shell_program.clone()
+    };
+    crate::platform::shell_kind(&program)
+}
+
+fn shell_quote(app: &SpritXApp, path: &str) -> String {
+    crate::platform::quote_path(path, active_shell_kind(app))
 }
 
 fn with_path(template: &str, quoted: &str) -> String {
@@ -467,7 +471,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                                 let mut ui = ft_ui(this);
                                 ui.show_hidden = !ui.show_hidden;
                                 let shown = ui.show_hidden;
-                                this.recording_action = ft_encode(&ui);
+                                this.file_tree_ui = ft_encode(&ui);
                                 this.show_toast(
                                     if shown {
                                         "Hidden files shown"
@@ -494,7 +498,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let mut ui = ft_ui(this);
                                 ui.refresh = ui.refresh.wrapping_add(1);
-                                this.recording_action = ft_encode(&ui);
+                                this.file_tree_ui = ft_encode(&ui);
                                 this.show_toast("File tree refreshed", cx);
                             }))
                             .child(icon(Icon::Refresh, 12.0, theme.fg_dim)),
@@ -503,7 +507,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                         ft_button("ft-close", theme)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.file_tree_visible = false;
-                                this.recording_action = None;
+                                this.file_tree_ui = None;
                                 cx.notify();
                             }))
                             .child(icon(Icon::X, 12.0, theme.fg_dim)),
@@ -560,7 +564,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
             .unwrap_or_else(|| path.clone());
         panel = panel
             .child(ft_ctx_backdrop(cx))
-            .child(render_ft_menu(&name, &path, is_dir, theme, cx));
+            .child(render_ft_menu(app, &name, &path, is_dir, theme, cx));
     }
 
     // --- resize handle ------------------------------------------------------
@@ -663,9 +667,13 @@ fn file_tree_row(
                 } else {
                     ui.expanded.push(path.clone());
                 }
-                this.recording_action = ft_encode(&ui);
+                this.file_tree_ui = ft_encode(&ui);
             } else {
-                let quoted = shell_quote(&path);
+                let quoted = shell_quote(this, &path);
+                if quoted.is_empty() {
+                    this.show_toast("This path cannot be safely inserted into cmd.exe; use PowerShell", cx);
+                    return;
+                }
                 if this.send_to_terminal(&quoted, false) {
                     this.show_toast(format!("Inserted {quoted}"), cx);
                 } else {
@@ -679,7 +687,7 @@ fn file_tree_row(
             cx.listener(move |this, _, _, cx| {
                 let mut ui = ft_ui(this);
                 ui.ctx = Some((path_for_ctx.clone(), is_dir));
-                this.recording_action = ft_encode(&ui);
+                this.file_tree_ui = ft_encode(&ui);
                 cx.notify();
             }),
         );
@@ -754,7 +762,7 @@ fn ft_ctx_backdrop(cx: &mut Context<SpritXApp>) -> AnyElement {
             cx.listener(|this, _, _, cx| {
                 let mut ui = ft_ui(this);
                 ui.ctx = None;
-                this.recording_action = ft_encode(&ui);
+                this.file_tree_ui = ft_encode(&ui);
                 cx.notify();
             }),
         )
@@ -763,7 +771,7 @@ fn ft_ctx_backdrop(cx: &mut Context<SpritXApp>) -> AnyElement {
             cx.listener(|this, _, _, cx| {
                 let mut ui = ft_ui(this);
                 ui.ctx = None;
-                this.recording_action = ft_encode(&ui);
+                this.file_tree_ui = ft_encode(&ui);
                 cx.notify();
             }),
         )
@@ -784,29 +792,42 @@ enum FtMenuAction {
 }
 
 fn render_ft_menu(
+    app: &SpritXApp,
     name: &str,
     path: &str,
     is_dir: bool,
     theme: Theme,
     cx: &mut Context<SpritXApp>,
 ) -> AnyElement {
-    let quoted = shell_quote(path);
+    let quoted = shell_quote(app, path);
+    let settings = &app.settings;
+    let kind = active_shell_kind(app);
+    let defaults = crate::backend::config::FileTreeConfig::default();
+    let cmd = cfg!(windows) && kind == crate::platform::ShellKind::Cmd;
+    let list = if cmd && settings.file_tree_list == defaults.dir_list { "dir {path}" } else { &settings.file_tree_list };
+    let view = if cmd && settings.file_tree_view == defaults.file_view { "type {path}" } else { &settings.file_tree_view };
+    let open_dir = if cmd && settings.file_tree_open == defaults.dir_open { "explorer {path}" } else { &settings.file_tree_open };
+    let cd = match kind {
+        crate::platform::ShellKind::PowerShell => "Set-Location -LiteralPath {path}",
+        crate::platform::ShellKind::Cmd => "cd /d {path}",
+        crate::platform::ShellKind::Posix => "cd {path}",
+    };
     let actions: Vec<(&'static str, Option<String>, FtMenuAction)> = if is_dir {
         vec![
             (
                 "Open folder",
-                chip_for("cd {path}"),
-                FtMenuAction::Run(with_path("cd {path}", &quoted)),
+                chip_for(cd),
+                FtMenuAction::Run(with_path(cd, &quoted)),
             ),
             (
                 "List",
-                chip_for("ls -la {path}"),
-                FtMenuAction::Run(with_path("ls -la {path}", &quoted)),
+                chip_for(list),
+                FtMenuAction::Run(with_path(list, &quoted)),
             ),
             (
                 "Open in editor",
-                chip_for("code {path}"),
-                FtMenuAction::Run(with_path("code {path}", &quoted)),
+                chip_for(if is_dir { open_dir } else { &settings.file_tree_open_file }),
+                FtMenuAction::Run(with_path(if is_dir { open_dir } else { &settings.file_tree_open_file }, &quoted)),
             ),
             ("Copy path", None, FtMenuAction::CopyPath),
             ("Insert path", None, FtMenuAction::InsertPath),
@@ -815,18 +836,18 @@ fn render_ft_menu(
         vec![
             (
                 "View",
-                chip_for("cat {path}"),
-                FtMenuAction::Run(with_path("cat {path}", &quoted)),
+                chip_for(view),
+                FtMenuAction::Run(with_path(view, &quoted)),
             ),
             (
                 "Edit",
-                chip_for("nano {path}"),
-                FtMenuAction::Run(with_path("nano {path}", &quoted)),
+                chip_for(&settings.file_tree_edit),
+                FtMenuAction::Run(with_path(&settings.file_tree_edit, &quoted)),
             ),
             (
                 "Open in editor",
-                chip_for("code {path}"),
-                FtMenuAction::Run(with_path("code {path}", &quoted)),
+                chip_for(if is_dir { open_dir } else { &settings.file_tree_open_file }),
+                FtMenuAction::Run(with_path(if is_dir { open_dir } else { &settings.file_tree_open_file }, &quoted)),
             ),
             ("Copy path", None, FtMenuAction::CopyPath),
             ("Insert path", None, FtMenuAction::InsertPath),
@@ -887,8 +908,12 @@ fn render_ft_menu(
             .on_click(cx.listener(move |this, _, _, cx| {
                 let mut ui = ft_ui(this);
                 ui.ctx = None;
-                this.recording_action = ft_encode(&ui);
+                this.file_tree_ui = ft_encode(&ui);
 
+                if quoted.is_empty() && !matches!(&action, FtMenuAction::CopyPath) {
+                    this.show_toast("This path cannot be safely inserted into cmd.exe; use PowerShell", cx);
+                    return;
+                }
                 match &action {
                     FtMenuAction::CopyPath => {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));

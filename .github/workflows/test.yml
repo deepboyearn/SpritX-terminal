@@ -12,6 +12,7 @@ name: tests
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 # A newer push to the same branch makes the previous run obsolete.
@@ -28,14 +29,19 @@ env:
 
 jobs:
   test:
-    name: cargo test
-    runs-on: ubuntu-latest
+    name: cargo test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       # v5+ runs on Node 24; v4 is still on the deprecated Node 20.
       - uses: actions/checkout@v7
 
       - name: Install system libraries
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -45,6 +51,7 @@ jobs:
             libfontconfig1-dev libfreetype-dev
 
       - name: Check the libraries are discoverable
+        if: runner.os == 'Linux'
         run: |
           for lib in wayland-client xkbcommon xkbcommon-x11 xcb fontconfig freetype2; do
             pkg-config --exists "$lib" || { echo "::error::missing pkg-config module: $lib"; exit 1; }

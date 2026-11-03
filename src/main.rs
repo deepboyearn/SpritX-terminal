@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use gpui::{App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size};
 
 use spritx_terminal::assets::Assets;

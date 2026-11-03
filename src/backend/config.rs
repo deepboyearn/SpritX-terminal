@@ -188,9 +188,9 @@ impl Default for FileTreeConfig {
     #[cfg(windows)]
     fn default() -> Self {
         Self {
-            dir_list: "dir {path}".to_string(),
-            dir_open: "explorer {path}".to_string(),
-            file_view: "type {path}".to_string(),
+            dir_list: "Get-ChildItem -Force -LiteralPath {path}".to_string(),
+            dir_open: "Invoke-Item -LiteralPath {path}".to_string(),
+            file_view: "Get-Content -LiteralPath {path}".to_string(),
             file_edit: "notepad {path}".to_string(),
             file_open: "notepad {path}".to_string(),
         }
@@ -257,17 +257,9 @@ pub fn default_history_ignore() -> Vec<String> {
     .collect()
 }
 
-/// `$XDG_CONFIG_HOME/spritx/config.toml` or `~/.config/spritx/config.toml`.
+/// Linux: XDG config directory; Windows: `%APPDATA%/spritx/config.toml`.
 pub fn config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
-        })?;
-    Some(base.join("spritx").join("config.toml"))
+    crate::platform::config_dir().map(|dir| dir.join("config.toml"))
 }
 
 /// Write via a same-directory temp file + rename. Permissions are forced to
@@ -303,7 +295,7 @@ pub fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
 /// Load the user config, creating a commented default file on first run.
 pub fn load() -> AppConfig {
     let Some(path) = config_path() else {
-        eprintln!("[spritx] HOME not set — using default config");
+        eprintln!("[spritx] user config directory unavailable — using default config");
         return AppConfig::default();
     };
     if !path.exists() {
@@ -352,7 +344,7 @@ pub fn load_from(path: &Path) -> AppConfig {
 
 /// Persist to `config_path()`.
 pub fn save(config: &AppConfig) -> Result<(), String> {
-    let path = config_path().ok_or_else(|| "HOME not set".to_string())?;
+    let path = config_path().ok_or_else(|| "user config directory unavailable".to_string())?;
     save_to(&path, config)
 }
 
@@ -422,7 +414,7 @@ mod tests {
         assert!(c.shell.program.is_none());
         assert!(c.shell.args.is_empty());
         assert_eq!(c.notifications.min_duration_sec, 10);
-        assert_eq!(c.file_tree.dir_list, "ls -la {path}");
+        assert_eq!(c.file_tree.dir_list, FileTreeConfig::default().dir_list);
         assert_eq!(c.remote.port, 4530);
         assert!(c.remote.auto_tunnel);
         assert!(c.history.enabled);

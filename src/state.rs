@@ -233,8 +233,8 @@ impl LeafState {
         Self {
             id,
             pty_id: Some(id),
-            cwd: "~/Projects/spritx".into(),
-            branch: "main".into(),
+            cwd: crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            branch: String::new(),
             remote: false,
             scroll_offset: 0.0,
         }
@@ -448,7 +448,7 @@ impl SettingsField {
             }
             Self::ShellProgram => {
                 settings.shell_program = if trimmed.is_empty() {
-                    "$SHELL (default)".to_string()
+                    crate::platform::DEFAULT_SHELL_LABEL.to_string()
                 } else {
                     trimmed.to_string()
                 };
@@ -513,8 +513,8 @@ impl Default for SettingsData {
             cursor_style: "Block",
             scrollback: 5_000,
             theme: "SpritX Dark",
-            shell_program: "$SHELL (default)".into(),
-            shell_args: "-l".into(),
+            shell_program: crate::platform::DEFAULT_SHELL_LABEL.into(),
+            shell_args: "[]".into(),
             notify_enabled: true,
             notify_min_duration: 10,
             notify_sound: false,

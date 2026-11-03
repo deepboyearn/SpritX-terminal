@@ -9,7 +9,7 @@
 //! never received a paintable rect. Sibling layers plus `deferred` remove that
 //! coupling and guarantee the card paints above the dim layer.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gpui::{
     AnyElement, Context, Div, ElementId, FontWeight, IntoElement, MouseButton, SharedString,
@@ -20,7 +20,7 @@ use crate::backend::history::HistoryEntry;
 use crate::components::buttons::{danger_button, dot, primary_button, text_button};
 use crate::components::icons::{Icon, icon};
 use crate::components::toggle::switch;
-use crate::screens::app_shell::{SpritXApp, hsla_to_hex, primary_font_family};
+use crate::screens::app_shell::{SpritXApp, hsla_to_hex};
 use crate::state::{
     LAYOUT_PRESETS, Modal, PaletteMode, SettingsField, SettingsMenu, SettingsSection,
     ThemeColorKey,
@@ -752,8 +752,7 @@ fn display_cwd(cwd: Option<&str>) -> String {
     let Some(cwd) = cwd else {
         return "—".to_string();
     };
-    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
-        let home = PathBuf::from(home);
+    if let Some(home) = crate::backend::files::home_dir() {
         if let Ok(rest) = Path::new(cwd).strip_prefix(&home) {
             let rest = rest.display().to_string();
             return if rest.is_empty() {
@@ -1303,7 +1302,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
     match section {
         SettingsSection::Appearance => {
             let term_theme = crate::terminal::term_theme();
-            let font_label = primary_font_family(&app.settings.font_family);
+            let font_label = crate::terminal::appearance().font_family.to_string();
             let size_editing = matches!(app.settings_field, Some(SettingsField::FontSize));
             let size_value = if size_editing {
                 format!("{}|", app.settings_buf)
@@ -1629,7 +1628,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 .child(setting_row(
                     theme,
                     "Program",
-                    "Shell executable; empty uses $SHELL",
+                    "Shell executable; empty uses the platform default",
                     editable_input(
                         "set-shell-program",
                         theme,
@@ -1643,7 +1642,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 .child(setting_row(
                     theme,
                     "Arguments",
-                    "Passed on every spawn",
+                    r#"JSON array, e.g. ["-NoLogo"]"#,
                     editable_input(
                         "set-shell-args",
                         theme,
@@ -1656,7 +1655,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 ))
                 .child(note(
                     theme,
-                    "Changes apply to new terminals only. Quoting cannot be represented.",
+                    "Changes apply to new terminals. [] uses shell integration defaults.",
                 ));
         }
         SettingsSection::Notifications => {
@@ -2282,7 +2281,7 @@ fn select_trigger(
 
 /// In-flow option list for the Font picker.
 fn font_options(app: &SpritXApp, theme: Theme, cx: &mut Context<SpritXApp>) -> AnyElement {
-    let current = primary_font_family(&app.settings.font_family);
+    let current = crate::terminal::appearance().font_family.to_string();
     let mut list = div()
         .id("font-list")
         .flex()

@@ -1,7 +1,10 @@
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use spritx_terminal::terminal::{SessionConfig, TerminalSession};
 
+#[cfg(unix)]
 fn wait_for(session: &mut TerminalSession, needle: &str, timeout: Duration) -> bool {
     let started = Instant::now();
     while started.elapsed() < timeout {
@@ -15,6 +18,7 @@ fn wait_for(session: &mut TerminalSession, needle: &str, timeout: Duration) -> b
     session.screen_text().contains(needle)
 }
 
+#[cfg(unix)]
 fn shell(script: &str) -> TerminalSession {
     TerminalSession::spawn(SessionConfig::command(
         "/bin/sh",
@@ -23,6 +27,7 @@ fn shell(script: &str) -> TerminalSession {
     .expect("spawn test shell")
 }
 
+#[cfg(unix)]
 #[test]
 fn shell_echo_round_trip() {
     let mut session = shell(
@@ -42,6 +47,7 @@ fn shell_echo_round_trip() {
     assert_eq!(session.exit_code(), Some(7));
 }
 
+#[cfg(unix)]
 #[test]
 fn ansi_colors_are_parsed() {
     let mut session = shell("printf '\\033[31mRED\\033[0m normal\\n'; sleep 0.1");
@@ -51,6 +57,7 @@ fn ansi_colors_are_parsed() {
     assert_ne!(format!("{:?}", cell.fgcolor()), "Default");
 }
 
+#[cfg(unix)]
 #[test]
 fn ctrl_c_interrupts_foreground_job() {
     let mut session = shell(
@@ -65,6 +72,7 @@ fn ctrl_c_interrupts_foreground_job() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn resize_and_scrollback_api() {
     let mut session = shell("seq 1 60; sleep 0.2");
@@ -78,6 +86,7 @@ fn resize_and_scrollback_api() {
     session.set_scrollback(0);
 }
 
+#[cfg(unix)]
 #[test]
 fn kill_stops_a_long_running_job() {
     let mut session = shell("sleep 60");
@@ -91,6 +100,7 @@ fn kill_stops_a_long_running_job() {
     assert!(session.exit_code().is_some(), "process should have exited");
 }
 
+#[cfg(unix)]
 #[test]
 fn ansi_color_sequences_survive_pump() {
     let mut session = shell(
@@ -138,6 +148,7 @@ fn term_row_maps_palette_and_attributes() {
     assert!(text.starts_with("RB"), "row text was: {text:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn resize_updates_size_and_scrollback_rendering() {
     let mut session = shell("seq 1 60; sleep 0.2");
@@ -193,6 +204,7 @@ fn resize_updates_size_and_scrollback_rendering() {
     assert_eq!(session.scrollback(), 0);
 }
 
+#[cfg(unix)]
 #[test]
 fn alternate_screen_suppresses_scrolling() {
     let mut session = shell("printf '\\033[?1049h'; sleep 0.1");
@@ -206,6 +218,7 @@ fn alternate_screen_suppresses_scrolling() {
     assert_eq!(session.scrollback(), 0);
 }
 
+#[cfg(unix)]
 #[test]
 fn mouse_reporting_is_detected_and_forwarded_to_the_child() {
     use spritx_terminal::terminal::{MouseAction, MouseMods, mouse_button};

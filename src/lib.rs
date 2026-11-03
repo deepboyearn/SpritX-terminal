@@ -4,6 +4,7 @@ pub mod components;
 pub mod keys;
 pub mod memprof;
 pub mod metrics;
+pub mod platform;
 pub mod screens;
 pub mod state;
 pub mod terminal;

@@ -4,12 +4,13 @@
 # refuses to continue unless the `tests` workflow has a *successful* run for the
 # very commit this run was dispatched on, so nothing ships untested.
 #
-# Five packages, one job each:
+# Six packages, one job each:
 #   Flatpak   cross-distro bundle, built from the manifest in packaging/flatpak
 #   AppImage  portable single file, assembled from the release binary
 #   deb       Ubuntu / Debian, via cargo-deb
 #   rpm       Fedora, via cargo-generate-rpm
 #   Arch      Omarchy / Arch, via the real PKGBUILD + makepkg in an Arch container
+#   Windows   native x64 MSVC executable, portable ZIP
 name: release
 
 on:
@@ -297,11 +298,36 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Publish: one release, five assets. Runs only if every package built.
+  # Portable Windows executable. ConPTY is provided by Windows 10/11.
+  windows:
+    name: Windows x64
+    needs: gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Path windows-package | Out-Null
+          Copy-Item target/release/spritx-terminal.exe, README.md, LICENSE -Destination windows-package
+          Compress-Archive -Path windows-package/* -DestinationPath "SpritX-$env:VERSION-windows-x86_64.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spritx-windows
+          path: SpritX-*-windows-x86_64.zip
+          if-no-files-found: error
+
+  # Publish: one release, six assets. Runs only if every package built.
   # ---------------------------------------------------------------------------
   release:
     name: Publish
-    needs: [gate, flatpak, appimage, deb, rpm, arch]
+    needs: [gate, flatpak, appimage, deb, rpm, arch, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

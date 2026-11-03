@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -112,7 +112,7 @@ impl HistoryStore {
         }
         let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
         writer()
-            .send((self.path.clone(), line))
+            .send(WriterMessage::Append(self.path.clone(), line))
             .map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -168,45 +168,49 @@ impl HistoryStore {
 
     /// Delete the history file (missing is fine).
     pub fn clear(&self) -> Result<(), String> {
-        let _guard = lock().lock().unwrap_or_else(|e| e.into_inner());
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
-        }
+        let (tx, rx) = mpsc::channel();
+        writer().send(WriterMessage::Clear(self.path.clone(), tx)).map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?
     }
 }
 
 /// `$XDG_CONFIG_HOME/spritx/history.jsonl`, falling back to
 /// `~/.config/spritx/history.jsonl`.
 pub fn history_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
-        })?;
-    Some(base.join("spritx").join(FILE_NAME))
+    crate::platform::config_dir().map(|dir| dir.join(FILE_NAME))
 }
 
-fn lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+enum WriterMessage {
+    Append(PathBuf, String),
+    Clear(PathBuf, Sender<Result<(), String>>),
 }
 
 /// Background JSONL writer. Keeps one file handle open and appends queued
 /// lines off the UI thread.
-fn writer() -> &'static Sender<(PathBuf, String)> {
-    static WRITER: OnceLock<Sender<(PathBuf, String)>> = OnceLock::new();
+fn writer() -> &'static Sender<WriterMessage> {
+    static WRITER: OnceLock<Sender<WriterMessage>> = OnceLock::new();
     WRITER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<(PathBuf, String)>();
+        let (tx, rx) = mpsc::channel::<WriterMessage>();
         std::thread::Builder::new()
             .name("spritx-history-writer".into())
             .spawn(move || {
                 let mut open: Option<(PathBuf, std::fs::File)> = None;
-                while let Ok((path, line)) = rx.recv() {
+                while let Ok(message) = rx.recv() {
+                    let (path, line) = match message {
+                        WriterMessage::Append(path, line) => (path, line),
+                        WriterMessage::Clear(path, reply) => {
+                            if open.as_ref().is_some_and(|(p, _)| p == &path) {
+                                open = None;
+                            }
+                            let result = match std::fs::remove_file(&path) {
+                                Ok(()) => Ok(()),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = reply.send(result);
+                            continue;
+                        }
+                    };
                     let reopen = open.as_ref().map(|(p, _)| p != &path).unwrap_or(true);
                     if reopen {
                         if let Some(dir) = path.parent() {

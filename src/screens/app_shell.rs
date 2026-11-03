@@ -105,11 +105,12 @@ pub struct SpritXApp {
     pub settings_field: Option<SettingsField>,
     /// Buffer for the field currently being edited.
     pub settings_buf: String,
-    /// System font families, loaded lazily when the Font picker opens.
+    /// Installed font families, shared by terminal fallback and the font picker.
     pub settings_fonts: Vec<String>,
     /// Whether the 16 ANSI swatches are expanded in Appearance.
     pub ansi_open: bool,
     pub recording_action: Option<String>,
+    pub file_tree_ui: Option<String>,
     pub tab_scroll: ScrollHandle,
     pub tab_menu: Option<TabMenuState>,
     pub pane_menu: Option<PaneMenuState>,
@@ -125,6 +126,10 @@ pub struct SpritXApp {
 impl SpritXApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let theme = Theme::dark();
+        let mut available_fonts = cx.text_system().all_font_names();
+        available_fonts.retain(|name| !name.trim().is_empty() && !name.starts_with('.'));
+        available_fonts.sort();
+        available_fonts.dedup();
         let app_config = AppConfig::load();
         let settings = settings_from_config(&app_config);
         let history = HistoryStore::open_default().map(|store| {
@@ -178,9 +183,10 @@ impl SpritXApp {
             settings_menu: None,
             settings_field: None,
             settings_buf: String::new(),
-            settings_fonts: Vec::new(),
+            settings_fonts: available_fonts,
             ansi_open: false,
             recording_action: None,
+            file_tree_ui: None,
             tab_scroll: ScrollHandle::new(),
             tab_menu: None,
             pane_menu: None,
@@ -192,7 +198,7 @@ impl SpritXApp {
             block_trackers: HashMap::new(),
             history,
         };
-        crate::terminal::set_appearance(terminal_appearance_from_config(&app_config));
+        crate::terminal::set_appearance(terminal_appearance_from_config(&app_config, &app.settings_fonts));
         crate::terminal::set_term_theme(terminal_theme_from_config(&app_config));
         // Register the wake signal before any reader thread can produce output.
         app.start_terminal_pump(cx);
@@ -285,7 +291,19 @@ impl SpritXApp {
         if self.sessions.contains_key(&leaf) {
             return;
         }
-        match TerminalSession::spawn_default() {
+        let args = match crate::platform::parse_shell_args(&self.settings.shell_args) {
+            Ok(args) => args,
+            Err(error) => {
+                self.session_errors.insert(leaf, error);
+                return;
+            }
+        };
+        let config = crate::terminal::SessionConfig::for_shell(
+            Some(&self.settings.shell_program),
+            &args,
+            None,
+        );
+        match TerminalSession::spawn(config) {
             Ok(session) => {
                 self.session_errors.remove(&leaf);
                 self.sessions.insert(leaf, session);
@@ -392,7 +410,7 @@ impl SpritXApp {
         apply_settings(&mut config, &self.settings);
         write_theme(&mut config, &crate::terminal::term_theme());
         let _ = config.save();
-        crate::terminal::set_appearance(terminal_appearance_from_config(&config));
+        crate::terminal::set_appearance(terminal_appearance_from_config(&config, &self.settings_fonts));
     }
 
     /// Expand/collapse a Settings dropdown (toggling the same one closes it).
@@ -440,6 +458,13 @@ impl SpritXApp {
         let Some(field) = self.settings_field.take() else {
             return;
         };
+        if field == SettingsField::ShellArgs {
+            if let Err(error) = crate::platform::parse_shell_args(&self.settings_buf) {
+                self.settings_field = Some(field);
+                self.show_toast(error, cx);
+                return;
+            }
+        }
         field.commit(&mut self.settings, &self.settings_buf);
         if field == SettingsField::HistoryIgnore {
             self.refresh_history_ignore();
@@ -460,7 +485,7 @@ impl SpritXApp {
     fn reload_from_config(&mut self, config: &AppConfig, cx: &mut Context<Self>) {
         self.settings = settings_from_config(config);
         self.selected_theme = theme_index_for(&config.appearance.theme);
-        crate::terminal::set_appearance(terminal_appearance_from_config(config));
+        crate::terminal::set_appearance(terminal_appearance_from_config(config, &self.settings_fonts));
         crate::terminal::set_term_theme(terminal_theme_from_config(config));
         self.refresh_history_ignore();
         cx.notify();
@@ -631,6 +656,7 @@ impl SpritXApp {
                             match added {
                                 Ok(()) => {
                                     let after = cx.text_system().all_font_names();
+                                    app.settings_fonts = after.clone();
                                     match after.iter().find(|name| !before.contains(*name)).cloned() {
                                         Some(family) => app.select_font(family, cx),
                                         None => app.show_toast(
@@ -1711,11 +1737,11 @@ impl SpritXApp {
 }
 
 /// Map the persisted appearance settings onto the terminal renderer. GPUI
-/// wants a single family name, so take the first entry of the CSS-style stack.
-fn terminal_appearance_from_config(config: &AppConfig) -> crate::terminal::TerminalAppearance {
+/// wants one installed family; resolve the configured stack before measuring cells.
+fn terminal_appearance_from_config(config: &AppConfig, available_fonts: &[String]) -> crate::terminal::TerminalAppearance {
     let appearance = &config.appearance;
     crate::terminal::TerminalAppearance {
-        font_family: primary_font_family(&appearance.font_family).into(),
+        font_family: resolve_terminal_font_family(&appearance.font_family, available_fonts).into(),
         font_size: f32::from(appearance.font_size).clamp(8.0, 40.0),
         scrollback: appearance.scrollback.max(1) as usize,
         cursor_shape: match appearance.cursor_style.as_str() {
@@ -1725,6 +1751,21 @@ fn terminal_appearance_from_config(config: &AppConfig) -> crate::terminal::Termi
         },
         cursor_blink: appearance.cursor_blink,
     }
+}
+
+/// Resolve the CSS-style stack ourselves: GPUI otherwise substitutes a
+/// proportional system font when the first family is absent. Measuring that
+/// font's zero width does not match its prompt text and pushes the cursor away.
+pub fn resolve_terminal_font_family(stack: &str, available_fonts: &[String]) -> String {
+    let configured = stack.split(',').map(|part| part.trim().trim_matches(['"', '\'']).trim());
+    let fallbacks = [crate::theme::MONO_FONT, "Cascadia Mono", "Consolas", "DejaVu Sans Mono",
+        "Liberation Mono", "Menlo", "Courier New"];
+    for candidate in configured.chain(fallbacks) {
+        if let Some(installed) = available_fonts.iter().find(|name| name.eq_ignore_ascii_case(candidate)) {
+            return installed.clone();
+        }
+    }
+    crate::theme::MONO_FONT.to_string()
 }
 
 /// `"JetBrainsMono Nerd Font", Menlo, monospace` → `JetBrainsMono Nerd Font`.
@@ -1866,8 +1907,8 @@ fn settings_from_config(config: &AppConfig) -> SettingsData {
         .program
         .clone()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "$SHELL (default)".to_string());
-    settings.shell_args = config.shell.args.join(" ");
+        .unwrap_or_else(|| crate::platform::DEFAULT_SHELL_LABEL.to_string());
+    settings.shell_args = serde_json::to_string(&config.shell.args).unwrap_or_default();
     settings.notify_enabled = config.notifications.enabled;
     settings.notify_min_duration = config.notifications.min_duration_sec;
     settings.notify_sound = config.notifications.sound;
@@ -1897,12 +1938,14 @@ fn apply_settings(config: &mut AppConfig, settings: &SettingsData) {
     config.appearance.cursor_blink = settings.cursor_blink;
     config.appearance.cursor_style = settings.cursor_style.to_ascii_lowercase();
     config.appearance.scrollback = settings.scrollback;
-    config.shell.program = if settings.shell_program.starts_with('$') {
+    config.shell.program = if crate::platform::is_default_shell(&settings.shell_program) {
         None
     } else {
         Some(settings.shell_program.clone())
     };
-    config.shell.args = settings.shell_args.split_whitespace().map(str::to_string).collect();
+    if let Ok(args) = crate::platform::parse_shell_args(&settings.shell_args) {
+        config.shell.args = args;
+    }
     config.notifications.enabled = settings.notify_enabled;
     config.notifications.min_duration_sec = settings.notify_min_duration;
     config.notifications.sound = settings.notify_sound;
@@ -1928,12 +1971,7 @@ fn apply_settings(config: &mut AppConfig, settings: &SettingsData) {
 }
 
 fn config_dir() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(|home| {
-            std::path::PathBuf::from(home)
-                .join(".config")
-                .join("spritx")
-        })
+    crate::platform::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
@@ -2413,7 +2451,7 @@ fn pane_title(cwd: &str, fallback: &str) -> String {
     if cwd.is_empty() {
         return fallback.to_string();
     }
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let shown = cwd
         .strip_prefix(home.as_str())
         .map(|rest| format!("~{rest}"))
@@ -2422,7 +2460,7 @@ fn pane_title(cwd: &str, fallback: &str) -> String {
         return "~".to_string();
     }
     shown
-        .rsplit('/')
+        .rsplit(['/', '\\'])
         .find(|part| !part.is_empty())
         .map(str::to_string)
         .unwrap_or(shown)
@@ -2436,3 +2474,20 @@ fn truncate_url(url: &str) -> String {
 }
 
 
+
+#[cfg(test)]
+mod font_fallback_tests {
+    use super::resolve_terminal_font_family;
+#[test]
+fn missing_fonts_use_an_installed_monospace_family() {
+    let available = vec!["Arial".into(), "Consolas".into(), "Courier New".into()];
+    let stack = crate::backend::config::AppearanceConfig::default().font_family;
+    assert_eq!(resolve_terminal_font_family(&stack, &available), "Consolas");
+    assert_eq!(resolve_terminal_font_family("Missing Nerd Font, monospace", &available), "Consolas");
+    assert_eq!(resolve_terminal_font_family("'courier new', Consolas", &available), "Courier New");
+    let available = vec!["JetBrains Mono".into(), "DejaVu Sans Mono".into()];
+    assert_eq!(resolve_terminal_font_family("Missing, 'DejaVu Sans Mono', monospace", &available), "DejaVu Sans Mono");
+    assert_eq!(resolve_terminal_font_family("JetBrains Mono, monospace", &available), "JetBrains Mono");
+}
+
+}

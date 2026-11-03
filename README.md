@@ -67,10 +67,12 @@ encrypted link.
 
 ## Requirements
 
-- Linux, Wayland or X11 (that is what this port is built and tested on; the
-  file-tree defaults and the `cloudflared` lookup also carry Windows and macOS
-  variants).
-- A Rust toolchain (edition 2021) and a working GL/Vulkan stack for GPUI.
+- Linux with Wayland or X11, or Windows 10 version 1809+ / Windows 11 (x64).
+  Windows uses native ConPTY and Windows PowerShell by default; no WSL is required.
+- A Rust toolchain (edition 2021) and working graphics drivers for GPUI.
+  On Windows use the MSVC Rust toolchain with Visual Studio Build Tools
+  (Desktop development with C++ and a Windows SDK). Linux needs the X11/Wayland,
+  xkbcommon, fontconfig and freetype development libraries listed in CI.
 - Optional: `cloudflared` for the Internet tunnel, `git` for the branch
   indicator, a Nerd Font for the icon set (the default font stack leads with
   `JetBrainsMono Nerd Font`).
@@ -130,7 +132,8 @@ remote panel, which also cuts their live connections.
 ## Configuration
 
 `$XDG_CONFIG_HOME/spritx/config.toml`, falling back to
-`~/.config/spritx/config.toml`. Keys are camelCase; every field has a default,
+`~/.config/spritx/config.toml` on Linux; `%APPDATA%\spritx\config.toml` on Windows.
+History and remote device credentials live beside this file. Keys are camelCase; every field has a default,
 so a partial file still loads. The file is written atomically with `0600`
 permissions, and a corrupt file is backed up next to it as
 `config.toml.broken`.
@@ -141,10 +144,30 @@ permissions, and a corrupt file is backed up next to it as
 | `[behavior]` | `focusFollowsMouse`, `showGitBranch`, `persistBlocks` |
 | `[shell]` | `program`, `args` |
 | `[notifications]` | `enabled`, `minDurationSec`, `sound` |
-| `[fileTree]` | `dirList`, `dirOpen`, `fileView`, `fileEdit`, `fileOpen` — command templates, `{path}` is replaced (POSIX-quoted) |
+| `[fileTree]` | `dirList`, `dirOpen`, `fileView`, `fileEdit`, `fileOpen` — command templates, `{path}` is quoted for the running shell |
 | `[remote]` | `port`, `autoTunnel` |
 | `[history]` | `enabled`, `ignore` (glob patterns; matching commands are never recorded) |
 | `[keybindings]` | action → keystroke map |
+
+### Windows usage
+
+Build and start from PowerShell with `cargo run --release`. Release builds are
+GUI executables, so opening `spritx-terminal.exe` does not open a second console.
+The portable Windows release ZIP contains the executable, README and license.
+
+Settings → Shell accepts a full executable path, including spaces. For PowerShell 7,
+select `C:\Program Files\PowerShell\7\pwsh.exe`; `cmd.exe` is also supported.
+Arguments are a JSON array (for example `["-NoLogo", "-NoProfile"]`), preserving
+spaces, quotes and backslashes; `[]` selects the shell's integration defaults.
+Shell changes take effect in new tabs and panes. Custom arguments replace the
+automatic integration arguments. Windows file actions default to PowerShell
+commands and can be changed under Settings; standard defaults adapt to cmd.exe.
+
+The embedded PowerShell prompt integration reports cwd (OSC 7), including Unicode
+paths, so the file tree follows `Set-Location`. It does not currently emit OSC 133
+command markers: rich command history and duration tracking need a shell that
+provides those markers. cmd.exe has no automatic cwd/history integration.
+Remote clients can connect between Linux and Windows using the same protocol.
 
 ### Shell integration
 
@@ -165,10 +188,11 @@ exactly the same — only the block, history and cwd extras stay off.
 
 Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml),
 which is started by hand from the Actions tab and refuses to run unless the
-tests workflow passed for the commit it is run on. It publishes five packages:
+tests workflow passed for the commit it is run on. It publishes six packages:
 
 | Package | For | Built with |
 | --- | --- | --- |
+| `SpritX-<version>-windows-x86_64.zip` | Windows 10/11 x64 | MSVC release build, portable ZIP |
 | `SpritX-<version>-x86_64.flatpak` | cross-distro, sandboxed | the manifest in `packaging/flatpak` |
 | `SpritX-<version>-x86_64.AppImage` | portable, nothing to install | `appimagetool` over an AppDir |
 | `spritx-terminal_<version>_amd64.deb` | Ubuntu, Debian, Mint | `cargo deb` |
@@ -194,9 +218,11 @@ SPRITX_UI_TESTS=1 cargo test  # also runs the smoke tests, which open a real
                               # window for ~3 seconds each
 ```
 
-Every push runs the same suite on GitHub Actions
+Every push and pull request runs the same suite on GitHub Actions
 ([`.github/workflows/test.yml`](.github/workflows/test.yml), Ubuntu with the
-X11/Wayland/font libraries installed).
+X11/Wayland/font libraries installed, and Windows). Unix PTY tests run on Linux;
+Windows runs native ConPTY tests for input/output, exit status, resize, process
+termination and PowerShell cwd reporting.
 
 Runtime hooks used for automation and profiling:
 
@@ -211,6 +237,7 @@ Runtime hooks used for automation and profiling:
 
 ```
 src/main.rs          window and application bootstrap
+src/platform.rs      platform config paths, default shell and path quoting
 src/terminal.rs      PTY session, vt100 screen, grid rendering, cell metrics
 src/keys.rs          keystroke → terminal byte encoding
 src/theme.rs         theme presets and loading

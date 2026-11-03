@@ -1586,20 +1586,13 @@ fn list_entries(cwd: Option<&str>, token: &str) -> Vec<(String, bool)> {
         Some(dir) if !dir.is_empty() => dir,
         _ => return Vec::new(),
     };
-    let token = match token.strip_prefix('~') {
-        Some(rest) => match std::env::var("HOME") {
-            Ok(home) => format!("{home}{rest}"),
-            Err(_) => token.to_string(),
-        },
-        None => token.to_string(),
-    };
-    let (dir_part, prefix) = if token.ends_with('/') {
-        (token.trim_end_matches('/').to_string(), String::new())
-    } else {
-        match token.rsplit_once('/') {
-            Some((dir, prefix)) => (dir.to_string(), prefix.to_string()),
-            None => (String::new(), token.clone()),
-        }
+    let token = crate::backend::files::expand_tilde(token).to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let token = token.replace('\\', "/");
+    let (dir_part, prefix) = match token.rsplit_once('/') {
+        // Keep the separator: / and C:/ must remain roots, not relative paths.
+        Some((dir, prefix)) => (format!("{dir}/"), prefix.to_string()),
+        None => (String::new(), token.clone()),
     };
     let dir_path = {
         let path = std::path::Path::new(&dir_part);
@@ -2004,6 +1997,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
     else bindTap(b,function(){ send(k[1]); focusTerm(); });
     keysEl.appendChild(b);
   });
+
+  // The desktop answers device queries using the host's cursor. Replaying the
+  // same bytes in a browser must not inject a second answer into the shell.
+  term.parser.registerCsiHandler({final:'n'},function(p){ return p[0]===5 || p[0]===6; });
+  term.parser.registerCsiHandler({prefix:'?',final:'n'},function(p){ return p[0]===6; });
+  term.parser.registerCsiHandler({final:'c'},function(p){ return !p.length || p[0]===0; });
+  term.parser.registerCsiHandler({prefix:'>',final:'c'},function(p){ return !p.length || p[0]===0; });
 
   term.onData(function(d){
     if(ctrlPending){

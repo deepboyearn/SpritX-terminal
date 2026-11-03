@@ -76,4 +76,7 @@ pub fn term_pad_y() -> Pixels {
 }
 
 pub const UI_FONT: &str = "Inter";
+#[cfg(windows)]
+pub const MONO_FONT: &str = "Consolas";
+#[cfg(not(windows))]
 pub const MONO_FONT: &str = "JetBrains Mono";

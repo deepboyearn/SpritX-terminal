@@ -896,12 +896,12 @@ pub struct SessionConfig {
 
 impl Default for SessionConfig {
     fn default() -> Self {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell = crate::platform::default_shell();
         let (args, env) = shell_setup(&shell);
         Self {
             program: shell,
             args,
-            cwd: std::env::var("HOME").ok(),
+            cwd: crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned()),
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             env,
@@ -914,10 +914,30 @@ fn shell_setup(shell: &str) -> (Vec<String>, Vec<(String, String)>) {
         .parent()
         .map(|root| root.join("scripts"))
         .unwrap_or_default();
-    let config_root = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config")))
-        .map(|base| base.join("spritx"));
+    let config_root = crate::platform::config_dir();
+
+    if crate::platform::shell_kind(shell) == crate::platform::ShellKind::PowerShell {
+        let mut args = vec!["-NoLogo".to_string()];
+        if let Some(root) = config_root {
+            let init = root.join("spritx-shell-init.ps1");
+            if std::fs::create_dir_all(&root).is_ok()
+                && std::fs::write(&init, include_str!("../assets/shell/spritx-shell-init.ps1")).is_ok()
+            {
+                args.extend([
+                    "-NoExit".into(),
+                    "-Command".into(),
+                    // Read as data, not as a script file: this works under the
+                    // default Windows execution policy without changing it.
+                    format!(". ([scriptblock]::Create([IO.File]::ReadAllText({})))",
+                        crate::platform::quote_path(&init.to_string_lossy(), crate::platform::ShellKind::PowerShell)),
+                ]);
+            }
+        }
+        return (args, Vec::new());
+    }
+    if crate::platform::shell_kind(shell) == crate::platform::ShellKind::Cmd {
+        return (vec!["/D".into()], Vec::new());
+    }
 
     if shell.ends_with("bash") {
         let init = scripts.join("spritx-shell-init.bash");
@@ -971,11 +991,34 @@ fn shell_setup(shell: &str) -> (Vec<String>, Vec<(String, String)>) {
 }
 
 impl SessionConfig {
+    /// Apply persisted shell choice without routing through a command shell.
+    /// Explicit arguments replace integration defaults; an empty list uses them.
+    pub fn for_shell(program: Option<&str>, args: &[String], cwd: Option<String>) -> Self {
+        let program = program.filter(|s| !crate::platform::is_default_shell(s))
+            .map(str::to_string).unwrap_or_else(crate::platform::default_shell);
+        let (default_args, env) = if args.is_empty() {
+            shell_setup(&program)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        Self {
+            program,
+            args: if args.is_empty() { default_args } else { args.to_vec() },
+            cwd: cwd.or_else(|| crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned())),
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+            env,
+        }
+    }
+
     pub fn command(program: impl Into<String>, args: impl IntoIterator<Item = String>) -> Self {
         Self {
             program: program.into(),
             args: args.into_iter().collect(),
-            ..Self::default()
+            cwd: crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned()),
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+            env: Vec::new(),
         }
     }
 }
@@ -995,6 +1038,7 @@ enum SessionBackend {
 }
 
 struct LocalPty {
+    shell_kind: crate::platform::ShellKind,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -1006,9 +1050,37 @@ struct RemotePane {
     link: Arc<crate::backend::remote_client::RemoteLink>,
 }
 
+/// ConPTY requests a cursor report before it releases the first output bytes.
+/// Let vt100 parse queries (including queries split across reads) and answer
+/// using the cursor at that point in the stream. Remote panes leave this off:
+/// the host terminal already answers its child's queries.
+#[derive(Default)]
+struct TerminalReplies {
+    enabled: bool,
+    bytes: Vec<u8>,
+}
+
+impl vt100::Callbacks for TerminalReplies {
+    fn unhandled_csi(&mut self, screen: &mut vt100::Screen, i1: Option<u8>, i2: Option<u8>, params: &[&[u16]], c: char) {
+        if !self.enabled || i2.is_some() { return; }
+        let first = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
+        match (i1, first, c) {
+            (None, 5, 'n') => self.bytes.extend_from_slice(b"\x1b[0n"),
+            (None | Some(b'?'), 6, 'n') => {
+                let (row, col) = screen.cursor_position();
+                let private = if i1.is_some() { "?" } else { "" };
+                self.bytes.extend_from_slice(format!("\x1b[{private}{};{}R", row + 1, col + 1).as_bytes());
+            }
+            (None, 0, 'c') => self.bytes.extend_from_slice(b"\x1b[?1;2c"),
+            (Some(b'>'), 0, 'c') => self.bytes.extend_from_slice(b"\x1b[>0;0;0c"),
+            _ => {}
+        }
+    }
+}
+
 pub struct TerminalSession {
     backend: SessionBackend,
-    parser: vt100::Parser,
+    parser: vt100::Parser<TerminalReplies>,
     /// Output waiting to be parsed. Shared with the PTY reader thread, or with
     /// the remote link task for a pane driven by another SpritX.
     pending: Arc<Mutex<Vec<u8>>>,
@@ -1090,15 +1162,17 @@ impl TerminalSession {
 
         let parser = {
             let _mem = crate::memprof::scope(crate::memprof::Region::Scrollback);
-            vt100::Parser::new(
+            vt100::Parser::new_with_callbacks(
                 NonZeroU16::new(rows).expect("rows > 0"),
                 NonZeroU16::new(cols).expect("cols > 0"),
                 appearance().scrollback.max(1),
+                TerminalReplies { enabled: true, bytes: Vec::new() },
             )
         };
 
         Ok(Self {
             backend: SessionBackend::Local(LocalPty {
+                shell_kind: crate::platform::shell_kind(&config.program),
                 writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
                 killer,
@@ -1125,10 +1199,11 @@ impl TerminalSession {
         let (cols, rows) = (80, 24);
         let parser = {
             let _mem = crate::memprof::scope(crate::memprof::Region::Scrollback);
-            vt100::Parser::new(
+            vt100::Parser::new_with_callbacks(
                 NonZeroU16::new(rows).expect("rows > 0"),
                 NonZeroU16::new(cols).expect("cols > 0"),
                 appearance().scrollback.max(1),
+                TerminalReplies::default(),
             )
         };
         Self {
@@ -1149,6 +1224,13 @@ impl TerminalSession {
     /// True when this pane is driven by another SpritX rather than a local shell.
     pub fn is_remote(&self) -> bool {
         matches!(self.backend, SessionBackend::Remote(_))
+    }
+
+    pub fn shell_kind(&self) -> Option<crate::platform::ShellKind> {
+        match &self.backend {
+            SessionBackend::Local(pty) => Some(pty.shell_kind),
+            SessionBackend::Remote(_) => None,
+        }
     }
 
     /// The peer's name, for a remote pane's title.
@@ -1181,6 +1263,8 @@ impl TerminalSession {
             std::mem::take(&mut *pending)
         };
         self.parser.process(&bytes);
+        let replies = std::mem::take(&mut self.parser.callbacks_mut().bytes);
+        if !replies.is_empty() { let _ = self.write(&replies); }
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.dirty.store(false, Ordering::Relaxed);
         Some(bytes)
@@ -1509,6 +1593,33 @@ fn terminate_process_group(pgid: libc::pid_t) {
             libc::killpg(pgid, libc::SIGKILL);
         }
     });
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_reports_follow_the_stream_and_survive_split_reads() {
+        let mut parser = vt100::Parser::new_with_callbacks(
+            NonZeroU16::new(24).unwrap(), NonZeroU16::new(80).unwrap(), 10,
+            TerminalReplies { enabled: true, bytes: Vec::new() },
+        );
+        parser.process(b"\x1b[4;9H\x1b[");
+        assert!(parser.callbacks().bytes.is_empty());
+        parser.process(b"6n\x1b[?6n\x1b[5n\x1b[c");
+        assert_eq!(parser.callbacks().bytes, b"\x1b[4;9R\x1b[?4;9R\x1b[0n\x1b[?1;2c");
+    }
+
+    #[test]
+    fn remote_screen_does_not_send_duplicate_device_replies() {
+        let mut parser = vt100::Parser::new_with_callbacks(
+            NonZeroU16::new(24).unwrap(), NonZeroU16::new(80).unwrap(), 10,
+            TerminalReplies::default(),
+        );
+        parser.process(b"\x1b[6n\x1b[c");
+        assert!(parser.callbacks().bytes.is_empty());
+    }
 }
 
 #[cfg(test)]

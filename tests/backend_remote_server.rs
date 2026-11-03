@@ -854,7 +854,7 @@ fn listing_helper_matches_the_original_completion_shape() {
     std::fs::write(dir.join(".hidden"), b"x").expect("write .hidden");
 
     let json = listing_json(dir.to_str(), "s");
-    assert!(json.starts_with("{\"t\":\"ls\",\"items\":["), "{json}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()["t"], "ls");
     assert!(json.contains("[\"src\",true]"), "{json}");
     assert!(json.contains("setup.sh"), "{json}");
     assert!(!json.contains("readme.md"), "{json}");

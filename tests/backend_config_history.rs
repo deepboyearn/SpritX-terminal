@@ -150,6 +150,21 @@ fn history_ignores_corrupt_lines_and_clear_removes_file() {
 }
 
 #[test]
+fn history_can_record_again_after_clear() {
+    let dir = temp_dir("clear_then_append");
+    let store = HistoryStore::new(dir.join("history.jsonl"));
+    store.append(HistoryEntry::new("before clear")).unwrap();
+    // Clear must wait for earlier writes and close the writer's cached handle.
+    store.clear().unwrap();
+    assert!(!store.path().exists());
+    store.append(HistoryEntry::new("after clear")).unwrap();
+    wait_for_lines(store.path(), 1);
+    assert_eq!(store.all().iter().map(|e| e.command.as_str()).collect::<Vec<_>>(), vec!["after clear"]);
+    store.clear().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn history_read_is_bounded_to_newest_window() {
     let dir = temp_dir("bounded");
     let path = dir.join("history.jsonl");

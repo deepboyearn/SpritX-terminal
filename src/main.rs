@@ -20,7 +20,23 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_, cx| cx.new(|cx| SpritXApp::new(cx)),
+                |window, cx| {
+                    let app = cx.new(|cx| SpritXApp::new(cx));
+                    let appearance = spritx_terminal::terminal::appearance();
+                    eprintln!(
+                        "[spritx] executable={} config={} terminal-font={}px family={} display-scale={}x",
+                        std::env::current_exe()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|_| "unknown".into()),
+                        spritx_terminal::backend::config::config_path()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "unavailable".into()),
+                        appearance.font_size,
+                        appearance.font_family,
+                        window.scale_factor(),
+                    );
+                    app
+                },
             )
             .expect("open SpritX window");
             cx.activate(true);

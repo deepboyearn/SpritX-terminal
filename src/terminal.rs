@@ -619,15 +619,17 @@ fn newline_run(appearance: &TerminalAppearance, fg: Hsla) -> TextRun {
 pub fn visible_cursor(screen: &vt100::Screen) -> Option<(u16, u16)> {
     let (row, col) = screen.cursor_position();
     let scrolled = screen.scrollback();
-    if usize::from(row) < scrolled {
-        return None;
-    }
-    let visible = row - scrolled as u16;
+    // Scrolling into history moves the live screen DOWN in the viewport.
+    let visible = usize::from(row).checked_add(scrolled)?;
     let (rows, _) = screen.size();
-    if visible >= rows.get() {
+    if visible >= usize::from(rows.get()) {
         return None;
     }
-    Some((visible, col))
+    Some((visible as u16, col))
+}
+
+pub fn cursor_blink_visible(enabled: bool, elapsed: std::time::Duration) -> bool {
+    !enabled || (elapsed.as_millis() / 500) % 2 == 0
 }
 
 /// Clamp a requested scroll offset into `[0, scrollback_len]`.
@@ -789,6 +791,7 @@ impl TerminalSession {
         let changed = target != self.parser.screen().scrollback();
         if changed {
             self.parser.screen_mut().set_scrollback(target);
+            self.clear_selection();
         }
         changed
     }
@@ -1420,6 +1423,7 @@ impl TerminalSession {
             NonZeroU16::new(rows).expect("rows > 0"),
             NonZeroU16::new(cols).expect("cols > 0"),
         );
+        self.clear_selection();
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.cols = cols;
         self.rows = rows;
@@ -1595,6 +1599,28 @@ fn terminate_process_group(pgid: libc::pid_t) {
 #[cfg(test)]
 mod query_tests {
     use super::*;
+
+    #[test]
+    fn scrollback_moves_the_live_cursor_down_and_hides_it_below_the_view() {
+        let mut parser = vt100::Parser::new(NonZeroU16::new(6).unwrap(), NonZeroU16::new(20).unwrap(), 100);
+        for _ in 0..30 { parser.process(b"line\r\n"); }
+        parser.process(b"\x1b[2;3H");
+        assert_eq!(visible_cursor(parser.screen()), Some((1, 2)));
+        parser.screen_mut().set_scrollback(2);
+        assert_eq!(visible_cursor(parser.screen()), Some((3, 2)));
+        parser.screen_mut().set_scrollback(5);
+        assert_eq!(visible_cursor(parser.screen()), None);
+    }
+
+    #[test]
+    fn cursor_blink_respects_the_setting_and_resets_after_input() {
+        use std::time::Duration;
+        assert!(cursor_blink_visible(true, Duration::ZERO));
+        assert!(cursor_blink_visible(true, Duration::from_millis(499)));
+        assert!(!cursor_blink_visible(true, Duration::from_millis(500)));
+        assert!(cursor_blink_visible(true, Duration::from_millis(1000)));
+        assert!(cursor_blink_visible(false, Duration::from_millis(750)));
+    }
 
     #[test]
     fn cursor_reports_follow_the_stream_and_survive_split_reads() {

@@ -405,6 +405,13 @@ impl RemoteServer {
         self.state.clients.load(Ordering::Relaxed)
     }
 
+    /// Remote geometry only owns the pane that a connected client is viewing.
+    pub fn has_clients_for_leaf(&self, leaf: u64) -> bool {
+        self.state.conns.lock().map(|conns| {
+            conns.values().any(|conn| conn.view.borrow().active == Some(leaf))
+        }).unwrap_or(false)
+    }
+
     /// The port actually bound (0 when stopped).
     pub fn port(&self) -> u16 {
         self.state.runtime.lock().map(|r| r.port).unwrap_or(0)

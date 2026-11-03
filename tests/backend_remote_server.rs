@@ -687,12 +687,15 @@ fn stop_sends_an_immediate_explicit_close_to_every_client() {
     let harness = Harness::start("stop_close_frame");
     let (mut first, mut a, _) = harness.pair_and_connect("one");
     harness.accept_attach(&mut first, &mut a);
+    assert!(harness.server.has_clients_for_leaf(7));
+    assert!(!harness.server.has_clients_for_leaf(8), "an unviewed pane keeps its desktop geometry");
     harness.server.new_pairing();
     let (mut second, mut b, _) = harness.pair_and_connect("two");
     harness.accept_attach(&mut second, &mut b);
     let start = Instant::now();
     harness.server.stop();
     assert!(start.elapsed() < Duration::from_millis(100), "stop blocked the caller");
+    assert!(!harness.server.has_clients_for_leaf(7));
     for client in [&mut first, &mut second] {
         client.socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let head = client.read_exact(2).expect("prompt close frame, not an abrupt EOF");

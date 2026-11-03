@@ -305,7 +305,7 @@ fn render_leaf(
                         session,
                         f32::from(event.position.x),
                         f32::from(event.position.y),
-                        true,
+                        false,
                     )
                 });
                 if let Some((row, col)) = cell {
@@ -647,7 +647,7 @@ fn render_live_terminal(
     .right(term_pad_x())
     .bottom(term_pad_y());
 
-    // Selection highlight, painted under the text so cell colors are kept.
+    // Translucent overlay also highlights cells with explicit ANSI backgrounds.
     let mut selection_rects: Vec<AnyElement> = Vec::new();
     if let Some(selection) = session.selection() {
         let (start, end) = selection.ordered();
@@ -672,7 +672,7 @@ fn render_live_terminal(
                     .top(term_pad_y() + px(f32::from(row) * line_h))
                     .w(px(f32::from(last - first + 1) * cell_w))
                     .h(px(line_h))
-                    .bg(term_theme.accent.opacity(0.34))
+                    .bg(term_theme.selection.opacity(0.45))
                     .into_any_element(),
             );
         }
@@ -693,13 +693,13 @@ fn render_live_terminal(
         .line_height(px(line_h))
         .bg(term_theme.background)
         .text_color(term_theme.foreground)
-        .children(selection_rects)
         .child(grid)
+        .children(selection_rects)
         .child(origin_canvas);
 
-    // Caret at the parser-reported position (scroll-aware). Shape comes from
-    // Settings via `terminal::appearance`; it no longer blinks.
-    if let Some((cursor_row, cursor_col)) = cursor {
+    // Only the active pane blinks; inactive panes retain a stable caret.
+    let active = app.active_tab().active_leaf == leaf_id && app.modal.is_none();
+    if let Some((cursor_row, cursor_col)) = cursor.filter(|_| !active || app.cursor_blink_on || !appearance.cursor_blink) {
         let wide = screen
             .cell(cursor_row, cursor_col)
             .is_some_and(|cell| cell.is_wide());
@@ -770,7 +770,7 @@ fn render_live_terminal(
     // than the one it can draw (its bottom rows, where a TUI keeps its prompt,
     // are then unreachable). The last client leaving changes the status stamp,
     // which repaints this pane and lets it take its size back.
-    let remote_driven = app.remote_clients() > 0;
+    let remote_driven = app.remote_server.as_ref().is_some_and(|server| server.has_clients_for_leaf(leaf_id));
     let (cur_cols, cur_rows) = session.size();
     body = body.child(
         canvas(

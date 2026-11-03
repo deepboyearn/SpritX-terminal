@@ -192,8 +192,7 @@ fn resize_updates_size_and_scrollback_rendering() {
         top_num >= 1 && top_num < 47,
         "scrolled top row should be earlier history, was {top_text:?}"
     );
-    let visible = session.visible_cursor().expect("cursor still visible");
-    assert_eq!(visible.0, cursor_live.0 - 10);
+    assert!(session.visible_cursor().is_none(), "the live cursor is below the historical viewport");
 
     // Scrolling back to the bottom restores the live view; clamping must
     // never exceed the available history.

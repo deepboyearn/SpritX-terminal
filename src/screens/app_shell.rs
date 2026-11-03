@@ -67,6 +67,8 @@ pub struct SpritXApp {
     pub next_tab_id: u64,
     pub next_leaf_id: u64,
     pub focus_handle: FocusHandle,
+    pub cursor_blink_on: bool,
+    pub cursor_blink_epoch: std::time::Instant,
     pub file_tree_visible: bool,
     pub file_tree_width: f32,
     pub modal: Option<Modal>,
@@ -164,6 +166,8 @@ impl SpritXApp {
             next_tab_id: 2,
             next_leaf_id: 2,
             focus_handle: cx.focus_handle(),
+            cursor_blink_on: true,
+            cursor_blink_epoch: std::time::Instant::now(),
             file_tree_visible: true,
             file_tree_width: 240.0,
             modal: match std::env::var("SPRITX_OPEN").as_deref() {
@@ -272,6 +276,13 @@ impl SpritXApp {
                 gpui::Timer::after(std::time::Duration::from_millis(500)).await;
                 let alive = this
                     .update(cx, |this, cx| {
+                        let visible = crate::terminal::cursor_blink_visible(
+                            this.settings.cursor_blink, this.cursor_blink_epoch.elapsed(),
+                        );
+                        if visible != this.cursor_blink_on {
+                            this.cursor_blink_on = visible;
+                            if this.modal.is_none() { cx.notify(); }
+                        }
                         if this.pump_terminals() {
                             cx.notify();
                         }
@@ -729,8 +740,11 @@ impl SpritXApp {
     pub fn type_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         if let Some(bytes) = crate::keys::encode_key(event) {
             let was_scrolled = self.active_scrolled();
+            let was_hidden = !self.cursor_blink_on;
+            self.cursor_blink_epoch = std::time::Instant::now();
+            self.cursor_blink_on = true;
             self.write_active(&bytes);
-            if was_scrolled {
+            if was_scrolled || was_hidden {
                 cx.notify();
             }
         }
@@ -1650,7 +1664,7 @@ impl Render for SpritXApp {
                     cx.stop_propagation();
                     return;
                 }
-                if mods.alt && !cmd {
+                if mods.alt && !cmd && matches!(key, "left" | "right" | "up" | "down") {
                     match key {
                         "left" | "up" => this.cycle_pane(false, cx),
                         "right" | "down" => this.cycle_pane(true, cx),

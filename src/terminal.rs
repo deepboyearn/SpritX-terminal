@@ -805,6 +805,27 @@ impl TerminalSession {
         visible_cursor(self.parser.screen())
     }
 
+    /// The current two-line Powerline prompt, if its header is visible. The
+    /// renderer gives this boundary a small visual gap without inserting a
+    /// whole terminal row into the PTY stream.
+    pub fn powerline_prompt_row(&self) -> Option<u16> {
+        let screen = self.parser.screen();
+        if screen.alternate_screen() || screen.scrollback() > 0 {
+            return None;
+        }
+        let (cursor_row, _) = self.visible_cursor()?;
+        for distance in 1..=4 {
+            let Some(header) = cursor_row.checked_sub(distance) else { break };
+            if header > 0
+                && screen.cell(header, 0).is_some_and(|cell| cell.contents() == "")
+                && screen.cell(header + 1, 0).is_some_and(|cell| cell.contents() == "❯")
+            {
+                return Some(header);
+            }
+        }
+        None
+    }
+
     /// Render one visible row (including scrollback rows) into styled spans.
     pub fn render_row(&self, row: u16, theme_fg: Hsla, theme_bg: Hsla) -> TermRow {
         term_row(self.parser.screen(), row, theme_fg, theme_bg)

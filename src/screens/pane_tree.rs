@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, Context, CursorStyle, ElementId, Entity, IntoElement, MouseButton,
-    Pixels, Render, SharedString, ScrollWheelEvent, Window, canvas, div, prelude::*, px, relative,
+    Pixels, Render, SharedString, ScrollWheelEvent, TextRun, Window, canvas, div, prelude::*, px, relative,
 };
 
 use crate::components::buttons::dot;
@@ -11,6 +11,79 @@ use crate::state::{
 };
 use crate::terminal;
 use crate::theme::{MONO_FONT, Theme, term_pad_x, term_pad_y};
+
+const PROMPT_GAP_PX: f32 = 6.0;
+const PROMPT_INPUT_GAP_PX: f32 = 2.0;
+
+type GridSection = (String, Vec<TextRun>);
+
+/// Split before one displayed row, dropping the newline at the boundary. Runs
+/// are byte-length aligned with the grid text, including one run per newline.
+fn split_grid_before_row(text: String, runs: Vec<TextRun>, row: u16) -> Option<(GridSection, GridSection)> {
+    let split = text.match_indices('\n').nth(usize::from(row).checked_sub(1)?)?.0;
+    let before = text[..split].to_string();
+    let after = text[split + 1..].to_string();
+    let mut before_runs = Vec::new();
+    let mut after_runs = Vec::new();
+    let mut offset = 0;
+    for run in runs {
+        let end = offset + run.len;
+        if end <= split {
+            before_runs.push(run);
+        } else if offset >= split + 1 {
+            after_runs.push(run);
+        } else if offset != split || run.len != 1 {
+            return None;
+        }
+        offset = end;
+    }
+    Some(((before, before_runs), (after, after_runs)))
+}
+
+fn split_powerline_grid(text: String, runs: Vec<TextRun>, prompt_row: u16) -> Option<(GridSection, GridSection, GridSection)> {
+    let (before, prompt_and_input) = split_grid_before_row(text, runs, prompt_row)?;
+    let (header, input) = split_grid_before_row(prompt_and_input.0, prompt_and_input.1, 1)?;
+    Some((before, header, input))
+}
+
+fn visual_row_top(row: u16, line_h: f32, prompt_row: Option<u16>) -> f32 {
+    let mut top = f32::from(row) * line_h;
+    if let Some(start) = prompt_row {
+        if row >= start { top += PROMPT_GAP_PX; }
+        if row > start { top += PROMPT_INPUT_GAP_PX; }
+    }
+    top
+}
+
+#[cfg(test)]
+mod prompt_gap_tests {
+    use super::*;
+
+    #[test]
+    fn split_keeps_utf8_runs_and_moves_prompt_and_cursor_together() {
+        let run = |len| TextRun {
+            len,
+            font: gpui::font("Consolas"),
+            color: gpui::rgb(0xffffff).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let text = "out\nX\n❯ ".to_string();
+        let runs = vec![run(3), run(1), run(4), run(1), run(4)];
+        let ((before, before_runs), (header, header_runs), (input, input_runs)) =
+            split_powerline_grid(text, runs, 1).unwrap();
+        assert_eq!(before, "out");
+        assert_eq!(header, "X");
+        assert_eq!(input, "❯ ");
+        assert_eq!(before_runs.iter().map(|run| run.len).sum::<usize>(), before.len());
+        assert_eq!(header_runs.iter().map(|run| run.len).sum::<usize>(), header.len());
+        assert_eq!(input_runs.iter().map(|run| run.len).sum::<usize>(), input.len());
+        assert_eq!(visual_row_top(0, 16.0, Some(1)), 0.0);
+        assert_eq!(visual_row_top(1, 16.0, Some(1)), 22.0);
+        assert_eq!(visual_row_top(2, 16.0, Some(1)), 40.0);
+    }
+}
 
 /// Payload used to resize a split while the 8px divider is dragged.
 #[derive(Clone, Debug)]
@@ -52,7 +125,15 @@ fn cell_from_position(
     let cols = f32::from(cols.max(1));
     let rows = f32::from(rows.max(1));
     let local_x = x - origin_x;
-    let local_y = y - origin_y;
+    let mut local_y = y - origin_y;
+    let prompt_row = session.powerline_prompt_row();
+    if let Some(start) = prompt_row {
+        if local_y >= f32::from(start + 1) * line_h + PROMPT_GAP_PX + PROMPT_INPUT_GAP_PX {
+            local_y -= PROMPT_GAP_PX + PROMPT_INPUT_GAP_PX;
+        } else if local_y >= f32::from(start) * line_h + PROMPT_GAP_PX {
+            local_y -= PROMPT_GAP_PX;
+        }
+    }
     // Clickable content area: the canvas rect when available, never smaller
     // than the laid-out text grid.
     let content_w = width.max(cols * cell_w);
@@ -609,20 +690,32 @@ fn render_live_terminal(
     let appearance = terminal::appearance();
     let term_theme = terminal::term_theme();
     let alternate = screen.alternate_screen();
+    let prompt_row = session.powerline_prompt_row();
 
     crate::metrics::add(crate::metrics::Name::Panes, 1);
-    // The grid is one shaped text element (runs + `\n` between lines) instead
-    // of one div/StyledText per row, and its contents are cached by the
-    // session so an idle repaint (click, caret blink) rebuilds nothing.
+    // Keep the grid in up to three shaped text elements. The current
+    // Powerline prompt gets 6px above its header and 2px above its input row.
     let grid = crate::metrics::terminal(|| {
         let (text, runs) = session.grid_text(term_theme.foreground, term_theme.background);
-        div()
+        let mut grid = div()
             .flex()
             .flex_col()
             .flex_1()
             .whitespace_nowrap()
-            .overflow_hidden()
-            .child(gpui::StyledText::new(text).with_runs(runs))
+            .overflow_hidden();
+        if let Some(((before, before_runs), (header, header_runs), (input, input_runs))) =
+            prompt_row.and_then(|row| split_powerline_grid(text.clone(), runs.clone(), row))
+        {
+            grid = grid
+                .child(gpui::StyledText::new(before).with_runs(before_runs))
+                .child(div().h(px(PROMPT_GAP_PX)).flex_none())
+                .child(gpui::StyledText::new(header).with_runs(header_runs))
+                .child(div().h(px(PROMPT_INPUT_GAP_PX)).flex_none())
+                .child(gpui::StyledText::new(input).with_runs(input_runs));
+        } else {
+            grid = grid.child(gpui::StyledText::new(text).with_runs(runs));
+        }
+        grid
     });
 
     // Absolute canvas that records where the grid content starts, so mouse
@@ -669,7 +762,7 @@ fn render_live_terminal(
                 div()
                     .absolute()
                     .left(term_pad_x() + px(f32::from(first) * cell_w))
-                    .top(term_pad_y() + px(f32::from(row) * line_h))
+                    .top(term_pad_y() + px(visual_row_top(row, line_h, prompt_row)))
                     .w(px(f32::from(last - first + 1) * cell_w))
                     .h(px(line_h))
                     .bg(term_theme.selection.opacity(0.45))
@@ -715,7 +808,7 @@ fn render_live_terminal(
             div()
                 .absolute()
                 .left(term_pad_x() + px(cursor_col as f32 * cell_w) + dx)
-                .top(term_pad_y() + px(cursor_row as f32 * line_h) + dy)
+                .top(term_pad_y() + px(visual_row_top(cursor_row, line_h, prompt_row)) + dy)
                 .w(caret_w)
                 .h(caret_h)
                 .bg(term_theme.cursor.opacity(0.85)),
@@ -779,7 +872,9 @@ fn render_live_terminal(
                     return;
                 }
                 let width = f32::from(bounds.size.width) - 2.0 * f32::from(term_pad_x()) - 2.0;
-                let height = f32::from(bounds.size.height) - 2.0 * f32::from(term_pad_y());
+                // Leave room for the prompt spacer without clipping the last
+                // terminal row when the shell reaches the pane bottom.
+                let height = f32::from(bounds.size.height) - 2.0 * f32::from(term_pad_y()) - PROMPT_GAP_PX - PROMPT_INPUT_GAP_PX;
                 if width <= 0.0 || height <= 0.0 {
                     return; // collapsed pane: keep the current size
                 }

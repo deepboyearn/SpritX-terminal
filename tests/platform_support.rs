@@ -218,6 +218,7 @@ mod windows {
         assert!(lines.iter().any(|line| line.contains("KEEP_ONE")));
         assert!(!lines[last_output + 1].trim().is_empty(), "extra blank rows before prompt: {lines:?}");
         assert!(lines[last_output + 2].contains("❯"), "typing row must follow header: {lines:?}");
+        assert_eq!(session.powerline_prompt_row(), Some((last_output + 1) as u16));
     }
 
     #[test]

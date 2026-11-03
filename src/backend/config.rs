@@ -63,7 +63,7 @@ impl Default for AppearanceConfig {
         Self {
             // Lead with a family that is actually installed and monospace.
             font_family:
-                r#""JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace"#
+                r#""JetBrainsMonoNL Nerd Font Mono", "JetBrainsMonoNL NFM", "JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace"#
                     .to_string(),
             font_size: 14,
             cursor_blink: true,
@@ -103,27 +103,27 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            background: "#0e1014".into(),
-            foreground: "#e6e6e6".into(),
-            cursor: "#e6e6e6".into(),
-            selection: "#3a4150".into(),
-            accent: "#4ea1ff".into(),
-            black: "#2c303a".into(),
-            red: "#ff5c8d".into(),
-            green: "#56d364".into(),
-            yellow: "#e3b341".into(),
-            blue: "#4ea1ff".into(),
-            magenta: "#c678dd".into(),
-            cyan: "#56b6c2".into(),
-            white: "#c0c4ce".into(),
-            bright_black: "#525866".into(),
-            bright_red: "#ff7ba0".into(),
-            bright_green: "#7ce081".into(),
-            bright_yellow: "#f0c674".into(),
-            bright_blue: "#73b5ff".into(),
-            bright_magenta: "#d49eea".into(),
-            bright_cyan: "#7fc8d3".into(),
-            bright_white: "#e6e9f0".into(),
+            background: "#1e1e2e".into(),
+            foreground: "#cdd6f4".into(),
+            cursor: "#a6e3a1".into(),
+            selection: "#45475a".into(),
+            accent: "#b4befe".into(),
+            black: "#45475a".into(),
+            red: "#f38ba8".into(),
+            green: "#a6e3a1".into(),
+            yellow: "#f9e2af".into(),
+            blue: "#89b4fa".into(),
+            magenta: "#cba6f7".into(),
+            cyan: "#94e2d5".into(),
+            white: "#bac2de".into(),
+            bright_black: "#585b70".into(),
+            bright_red: "#f38ba8".into(),
+            bright_green: "#a6e3a1".into(),
+            bright_yellow: "#f9e2af".into(),
+            bright_blue: "#89b4fa".into(),
+            bright_magenta: "#f5c2e7".into(),
+            bright_cyan: "#94e2d5".into(),
+            bright_white: "#cdd6f4".into(),
         }
     }
 }
@@ -407,7 +407,7 @@ mod tests {
         let c = AppConfig::default();
         assert_eq!(c.appearance.font_size, 14);
         assert_eq!(c.appearance.scrollback, 5000);
-        assert_eq!(c.appearance.theme.background, "#0e1014");
+        assert_eq!(c.appearance.theme.background, "#1e1e2e");
         assert!(!c.behavior.focus_follows_mouse);
         assert!(c.behavior.show_git_branch);
         assert!(c.behavior.persist_blocks);

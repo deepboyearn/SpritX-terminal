@@ -126,11 +126,24 @@ pub struct SpritXApp {
 impl SpritXApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let theme = Theme::dark();
+        if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
+            include_bytes!("../../assets/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf"),
+        )]) {
+            eprintln!("[spritx] could not register bundled terminal font: {error}");
+        }
         let mut available_fonts = cx.text_system().all_font_names();
         available_fonts.retain(|name| !name.trim().is_empty() && !name.starts_with('.'));
         available_fonts.sort();
         available_fonts.dedup();
-        let app_config = AppConfig::load();
+        let mut app_config = AppConfig::load();
+        // Upgrade the former stock theme; custom themes remain available.
+        if theme_index_for(&app_config.appearance.theme) == 1 {
+            write_theme(&mut app_config, &crate::theme_presets::PRESETS[0].theme());
+            if app_config.appearance.font_family.starts_with("\"JetBrainsMono Nerd Font\"") {
+                app_config.appearance.font_family = crate::backend::config::AppearanceConfig::default().font_family;
+            }
+            let _ = app_config.save();
+        }
         let settings = settings_from_config(&app_config);
         let history = HistoryStore::open_default().map(|store| {
             store.with_ignore(

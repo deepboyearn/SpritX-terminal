@@ -79,6 +79,29 @@ mod windows {
     use spritx_terminal::terminal::TerminalSession;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn prompt_header_fits_small_split_panes() {
+        let script = format!(
+            "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n{}\n{}",
+            include_str!("../assets/shell/spritx-shell-init.ps1"),
+            r#"$result = foreach ($width in @(8,12,24,40,80)) {
+                $bar = Format-SpritXPromptBar 'LongUserNameForTesting' 'long-project-directory-name' 'v26.12.1' '23:10' $width
+                $plain = $bar -replace '\x1b\[[0-9;]*m', ''
+                @{ width=$width; cells=(Get-SpritXCells $plain) }
+            }; $result | ConvertTo-Json -Compress"#,
+        );
+        let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let output = std::process::Command::new(platform::default_shell())
+            .args(["-NoLogo", "-NoProfile", "-EncodedCommand", &spritx_terminal::backend::remote::b64(&utf16)])
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(rows.len(), 5);
+        for row in rows {
+            assert!(row["cells"].as_u64().unwrap() < row["width"].as_u64().unwrap(), "{row}");
+        }
+    }
+
     fn powershell(script: &str) -> TerminalSession {
         let mut config = SessionConfig::command(
             platform::default_shell(),
@@ -163,7 +186,7 @@ mod windows {
         );
         let mut session = TerminalSession::spawn(config).unwrap();
         assert!(
-            session.wait_for_text("PS ", Duration::from_secs(15)),
+            session.wait_for_text("❯", Duration::from_secs(15)),
             "{}",
             session.screen_text()
         );

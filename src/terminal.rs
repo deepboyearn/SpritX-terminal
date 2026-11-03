@@ -940,40 +940,37 @@ fn shell_setup(shell: &str) -> (Vec<String>, Vec<(String, String)>) {
     }
 
     if shell.ends_with("bash") {
-        let init = scripts.join("spritx-shell-init.bash");
-        if let (Some(root), true) = (config_root, init.exists()) {
+        if let Some(root) = config_root {
             let rc = root.join("gpui-bashrc");
-            let body = format!(
-                "[ -f \"$HOME/.bashrc\" ] && source \"$HOME/.bashrc\"\nsource \"{}\"\n",
-                init.display()
-            );
-            if std::fs::create_dir_all(&root).is_ok() && std::fs::write(&rc, body).is_ok() {
-                return (
-                    vec!["--rcfile".to_string(), rc.display().to_string(), "-i".to_string()],
-                    Vec::new(),
-                );
+            let prompt = root.join("spritx-prompt.bash");
+            let init = scripts.join("spritx-shell-init.bash");
+            let quote = |p: &std::path::Path| crate::platform::quote_path(&p.to_string_lossy(), crate::platform::ShellKind::Posix);
+            let body = format!("[ -f \"$HOME/.bashrc\" ] && source \"$HOME/.bashrc\"\n[ -f {0} ] && source {0}\nsource {1}\n", quote(&init), quote(&prompt));
+            if std::fs::create_dir_all(&root).is_ok()
+                && std::fs::write(&prompt, include_str!("../assets/shell/spritx-prompt.bash")).is_ok()
+                && std::fs::write(&rc, body).is_ok()
+            {
+                return (vec!["--rcfile".into(), rc.to_string_lossy().into_owned(), "-i".into()], Vec::new());
             }
         }
-        return (vec!["-l".to_string()], Vec::new());
+        return (vec!["-l".into()], Vec::new());
     }
 
     if shell.ends_with("zsh") {
-        let init = scripts.join("spritx-shell-init.zsh");
-        if let (Some(root), true) = (config_root, init.exists()) {
+        if let Some(root) = config_root {
             let zdot = root.join("gpui-zdotdir");
-            let rc = zdot.join(".zshrc");
-            let body = format!(
-                "[ -f \"$HOME/.zshrc\" ] && source \"$HOME/.zshrc\"\nsource \"{}\"\n",
-                init.display()
-            );
-            if std::fs::create_dir_all(&zdot).is_ok() && std::fs::write(&rc, body).is_ok() {
-                return (
-                    vec!["-i".to_string()],
-                    vec![("ZDOTDIR".to_string(), zdot.display().to_string())],
-                );
+            let prompt = zdot.join("spritx-prompt.zsh");
+            let init = scripts.join("spritx-shell-init.zsh");
+            let quote = |p: &std::path::Path| crate::platform::quote_path(&p.to_string_lossy(), crate::platform::ShellKind::Posix);
+            let body = format!("[ -f \"$HOME/.zshrc\" ] && source \"$HOME/.zshrc\"\n[ -f {0} ] && source {0}\nsource {1}\n", quote(&init), quote(&prompt));
+            if std::fs::create_dir_all(&zdot).is_ok()
+                && std::fs::write(&prompt, include_str!("../assets/shell/spritx-prompt.zsh")).is_ok()
+                && std::fs::write(zdot.join(".zshrc"), body).is_ok()
+            {
+                return (vec!["-i".into()], vec![("ZDOTDIR".into(), zdot.to_string_lossy().into_owned())]);
             }
         }
-        return (vec!["-l".to_string()], Vec::new());
+        return (vec!["-l".into()], Vec::new());
     }
 
     if shell.ends_with("fish") {

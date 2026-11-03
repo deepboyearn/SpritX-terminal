@@ -53,6 +53,14 @@ fn hsla(value: &str) -> Hsla {
 /// The presets shown in Settings → Appearance, in display order.
 pub const PRESETS: &[ThemePreset] = &[
     ThemePreset {
+        name: "SpritX Pastel",
+        colors: [
+            "#1e1e2e", "#cdd6f4", "#a6e3a1", "#45475a", "#b4befe", "#45475a", "#f38ba8",
+            "#a6e3a1", "#f9e2af", "#89b4fa", "#cba6f7", "#94e2d5", "#bac2de", "#585b70",
+            "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#cdd6f4",
+        ],
+    },
+    ThemePreset {
         name: "SpritX Dark",
         colors: [
             "#0e1014", "#e6e6e6", "#e6e6e6", "#3a4150", "#4ea1ff", // background, foreground, cursor, selection, accent
@@ -135,3 +143,17 @@ pub const PRESETS: &[ThemePreset] = &[
         ],
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pastel_defaults_match_the_preset() {
+        let config = crate::backend::config::AppConfig::default();
+        let value = serde_json::to_value(&config.appearance.theme).unwrap();
+        let expected = &super::PRESETS[0];
+        assert_eq!(expected.name, "SpritX Pastel");
+        assert_eq!(value["background"], expected.colors[0]);
+        assert_eq!(value["foreground"], expected.colors[1]);
+        assert_eq!(value["cursor"], expected.colors[2]);
+    }
+}

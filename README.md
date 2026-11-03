@@ -259,3 +259,16 @@ src/backend/
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### SpritX Pastel appearance
+
+The stock appearance now uses a dark plum background and pastel ANSI colors.
+PowerShell, Bash and Zsh get a two-line Powerline prompt with user, current folder,
+Node version (when available), and local time. Prompt styling is scoped to SpritX;
+your shell profile is not modified. Custom shell arguments bypass this integration.
+The previous stock SpritX Dark theme upgrades automatically; custom themes stay intact.
+
+JetBrainsMonoNL Nerd Font Mono is bundled for the segment arrows and icons.
+Font source and SIL Open Font License: [assets/fonts](assets/fonts/README.md).
+Colored `ls` output depends on your shell's listing tool and its configuration;
+this theme supplies the palette without replacing the listing command.

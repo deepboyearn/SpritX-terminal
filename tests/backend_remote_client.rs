@@ -56,6 +56,7 @@ fn server(tag: &str) -> RemoteServer {
         title: "shell".into(),
         tab: "peer".into(),
         tab_id: 1,
+        activity: Default::default(),
     }]);
     server.set_active_leaf(7);
     server

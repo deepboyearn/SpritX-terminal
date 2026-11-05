@@ -1,9 +1,10 @@
 use gpui::{Hsla, Pixels, rgb, rgba, px};
 
-/// Chrome colors for the dark SpritX UI. Terminal themes only affect the
-/// transcript, matching the web app where themes never repaint the chrome.
+/// Workspace chrome colors. The terminal transcript has its own palette.
 #[derive(Clone, Copy)]
 pub struct Theme {
+    pub outer: Hsla,
+    pub sidebar: Hsla,
     pub bg: Hsla,
     pub bg_soft: Hsla,
     pub border: Hsla,
@@ -26,11 +27,13 @@ pub struct Theme {
 impl Theme {
     pub fn dark() -> Self {
         Self {
-            bg: rgb(0x1e1e2e).into(),
-            bg_soft: rgb(0x181825).into(),
-            border: rgb(0x313244).into(),
-            fg: rgb(0xcdd6f4).into(),
-            fg_dim: rgb(0x9399b2).into(),
+            outer: rgb(0x0a0a0c).into(),
+            sidebar: rgb(0x0f0f10).into(),
+            bg: rgb(0x141415).into(),
+            bg_soft: rgb(0x232325).into(),
+            border: rgba(0xffffff14).into(),
+            fg: rgb(0xededed).into(),
+            fg_dim: rgb(0xa1a1a6).into(),
             accent: rgb(0xb4befe).into(),
             danger: rgb(0xf38ba8).into(),
             danger_soft: rgb(0xeba0ac).into(),
@@ -46,12 +49,34 @@ impl Theme {
         }
     }
 
+    pub fn light() -> Self {
+        Self {
+            outer: rgb(0xf0f3f0).into(),
+            sidebar: rgb(0xf8fdf9).into(),
+            bg: rgb(0xffffff).into(),
+            bg_soft: rgb(0xf1f5f2).into(),
+            border: rgb(0xe5eae6).into(),
+            fg: rgb(0x18181b).into(),
+            fg_dim: rgb(0x52525b).into(),
+            accent: rgb(0x405eb0).into(),
+            danger: rgb(0xb91c1c).into(),
+            danger_soft: rgb(0x9f1239).into(),
+            success: rgb(0x16a34a).into(),
+            warning: rgb(0xb45309).into(),
+            white_04: rgba(0x0000000a).into(),
+            white_06: rgba(0x0000000f).into(),
+            white_08: rgba(0x00000014).into(),
+            white_16: rgba(0x00000029).into(),
+            ..Self::dark()
+        }
+    }
+
     pub fn accent_a(&self, alpha: f32) -> Hsla {
         self.accent.opacity(alpha)
     }
 
     pub fn white_a(&self, alpha: f32) -> Hsla {
-        Hsla::from(rgb(0xffffff)).opacity(alpha)
+        self.fg.opacity(alpha)
     }
 
     pub fn danger_a(&self, alpha: f32) -> Hsla {
@@ -60,7 +85,7 @@ impl Theme {
 }
 
 pub fn tab_bar_h() -> Pixels {
-    px(34.0)
+    px(44.0)
 }
 
 pub fn body_pad() -> Pixels {

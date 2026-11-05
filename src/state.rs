@@ -220,6 +220,7 @@ impl PaneNode {
 
 #[derive(Clone)]
 pub struct LeafState {
+    pub activity: crate::backend::remote::CommandActivity,
     pub id: LeafId,
     pub pty_id: Option<u64>,
     pub cwd: String,
@@ -232,6 +233,7 @@ impl LeafState {
     pub fn sample(id: LeafId) -> Self {
         Self {
             id,
+            activity: Default::default(),
             pty_id: Some(id),
             cwd: crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             branch: String::new(),

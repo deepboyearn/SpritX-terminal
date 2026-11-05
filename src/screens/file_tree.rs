@@ -24,8 +24,8 @@ use gpui::{
 use crate::backend::files::{FsEntry, expand_tilde, home_dir, list_dir};
 use crate::components::icons::{Icon, icon};
 use crate::screens::app_shell::SpritXApp;
-use crate::state::TabState;
-use crate::theme::{MONO_FONT, Theme};
+use crate::state::{PaletteMode, TabState};
+use crate::theme::Theme;
 
 const FT_PREFIX: &str = "filetree-ui";
 const FT_SEP: char = '\u{1f}';
@@ -379,7 +379,9 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
 
     let _mem = crate::memprof::scope(crate::memprof::Region::FileTree);
     let tree = match root.as_deref() {
-        Some(root) if !loading => Some(cached_tree(root, ui.show_hidden, ui.refresh, &ui.expanded)),
+        Some(root) if !loading && !app.file_list_collapsed => {
+            Some(cached_tree(root, ui.show_hidden, ui.refresh, &ui.expanded))
+        }
         _ => None,
     };
     let mut rows = Vec::new();
@@ -397,8 +399,8 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .min_w(px(180.))
         .min_h_0()
         .h_full()
-        .rounded(px(5.))
-        .bg(theme.bg_soft)
+        .rounded(px(12.))
+        .bg(theme.sidebar)
         .border_1()
         .border_color(theme.border)
         .overflow_hidden()
@@ -415,7 +417,46 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
             },
         ));
 
-    // --- header -------------------------------------------------------------
+    panel = panel.child(
+        div()
+            .flex()
+            .flex_none()
+            .h(crate::theme::tab_bar_h())
+            .items_center()
+            .justify_between()
+            .px(px(12.))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon(Icon::Blocks, 16.0, theme.fg))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("SpritX")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(
+                        ft_button("workspace-search", theme)
+                            .on_click(cx.listener(|this, _, _, cx| this.open_palette(PaletteMode::Command, cx)))
+                            .child(icon(Icon::Search, 14.0, theme.fg_dim)),
+                    )
+                    .child(
+                        ft_button("workspace-hide-sidebar", theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.file_tree_visible = false;
+                                cx.notify();
+                            }))
+                            .child(icon(Icon::Sidebar, 14.0, theme.fg_dim)),
+                    ),
+            ),
+    );
+
+    // --- directory controls -------------------------------------------------
     panel = panel.child(
         div()
             .flex()
@@ -483,7 +524,6 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                             }))
                             .child(
                                 div()
-                                    .font_family(MONO_FONT)
                                     .text_size(px(11.))
                                     .text_color(if ui.show_hidden {
                                         theme.accent
@@ -502,6 +542,18 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                                 this.show_toast("File tree refreshed", cx);
                             }))
                             .child(icon(Icon::Refresh, 12.0, theme.fg_dim)),
+                    )
+                    .child(
+                        ft_button("ft-toggle-file-list", theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.file_list_collapsed = !this.file_list_collapsed;
+                                cx.notify();
+                            }))
+                            .child(icon(
+                                if app.file_list_collapsed { Icon::EyeOff } else { Icon::Eye },
+                                14.0,
+                                theme.fg_dim,
+                            )),
                     )
                     .child(
                         ft_button("ft-close", theme)
@@ -525,7 +577,9 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .py(px(4.))
         .text_size(px(12.5));
 
-    if loading {
+    if app.file_list_collapsed {
+        // The directory header remains visible while the list is collapsed.
+    } else if loading {
         body = body.child(ft_note(theme, 0, "Loading…"));
     } else if root.is_none() {
         body = body.child(ft_note(theme, 0, "Unknown directory"));
@@ -557,7 +611,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     panel = panel.child(body);
 
     // --- context menu -------------------------------------------------------
-    if let Some((path, is_dir)) = ui.ctx.clone() {
+    if let Some((path, is_dir)) = ui.ctx.clone().filter(|_| !app.file_list_collapsed) {
         let name = Path::new(&path)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -576,9 +630,18 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
             .right(px(0.))
             .top(px(0.))
             .bottom(px(0.))
-            .w(px(5.))
+            .w(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
             .cursor_col_resize()
-            .hover(|s| s.bg(theme.accent.opacity(0.35)))
+            .child(
+                div()
+                    .w(px(2.))
+                    .h(px(28.))
+                    .rounded(px(1.))
+                    .bg(theme.fg_dim.opacity(0.45)),
+            )
             .on_click(cx.listener(|this, event: &gpui::ClickEvent, _: &mut gpui::Window, cx| {
                 if event.click_count() >= 2 {
                     this.file_tree_width = 240.0;
@@ -949,7 +1012,6 @@ fn render_ft_menu(
                     .bg(theme.bg_soft)
                     .border_1()
                     .border_color(theme.border)
-                    .font_family(MONO_FONT)
                     .text_size(px(10.5))
                     .text_color(theme.fg_dim)
                     .child(chip),

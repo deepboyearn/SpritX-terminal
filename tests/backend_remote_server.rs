@@ -64,12 +64,14 @@ impl Harness {
                 title: "shell".into(),
                 tab: "spritx".into(),
                 tab_id: 1,
+                activity: Default::default(),
             },
             TabInfo {
                 id: 8,
                 title: "api".into(),
                 tab: "spritx".into(),
                 tab_id: 1,
+                activity: Default::default(),
             },
         ]);
         server.set_active_leaf(7);
@@ -535,18 +537,21 @@ fn publishing_new_tabs_reaches_the_client() {
             title: "shell".into(),
             tab: "spritx".into(),
             tab_id: 1,
+            activity: Default::default(),
         },
         TabInfo {
             id: 8,
             title: "api".into(),
             tab: "spritx".into(),
             tab_id: 1,
+            activity: Default::default(),
         },
         TabInfo {
             id: 9,
             title: "docs".into(),
             tab: "spritx".into(),
             tab_id: 2,
+            activity: Default::default(),
         },
     ]);
     let (items, active) = client.expect_tabs(&mut session);
@@ -568,6 +573,7 @@ fn losing_the_shared_pane_falls_back_to_another() {
         title: "shell".into(),
         tab: "spritx".into(),
         tab_id: 1,
+        activity: Default::default(),
     }]);
     let (items, active) = client.expect_tabs(&mut session);
     assert_eq!((items.len(), active), (1, Some(7)));

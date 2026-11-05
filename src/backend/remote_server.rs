@@ -217,6 +217,7 @@ pub struct RemoteStatus {
 /// A live, authenticated bridge: one device watching (and driving) one pane.
 struct ConnSlot {
     device_id: String,
+    mobile: bool,
     /// The pane list *and* the pane this connection drives, announced together.
     view: watch::Sender<ConnView>,
     /// Cuts this connection (device revocation).
@@ -410,6 +411,19 @@ impl RemoteServer {
         self.state.conns.lock().map(|conns| {
             conns.values().any(|conn| conn.view.borrow().active == Some(leaf))
         }).unwrap_or(false)
+    }
+
+    pub fn mobile_client_panes(&self) -> Vec<u64> {
+        let Ok(conns) = self.state.conns.lock() else {
+            return Vec::new();
+        };
+        let mut panes: Vec<_> = conns.values()
+            .filter(|conn| conn.mobile)
+            .filter_map(|conn| conn.view.borrow().active)
+            .collect();
+        panes.sort_unstable();
+        panes.dedup();
+        panes
     }
 
     /// The port actually bound (0 when stopped).
@@ -953,9 +967,21 @@ async fn index() -> Response {
         .into_response()
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, AxumState(weak): AxumState<WeakState>) -> Response {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    AxumState(weak): AxumState<WeakState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let mobile = headers.get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let agent = value.to_ascii_lowercase();
+            ["mobile", "android", "iphone", "ipad", "ipod"]
+                .iter()
+                .any(|marker| agent.contains(marker))
+        });
     match weak.0.upgrade() {
-        Some(state) => ws.on_upgrade(move |socket| bridge(socket, state)),
+        Some(state) => ws.on_upgrade(move |socket| bridge(socket, state, mobile)),
         None => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
@@ -1046,11 +1072,12 @@ impl<'a> ClientGuard<'a> {
 impl Drop for ClientGuard<'_> {
     fn drop(&mut self) {
         self.0.clients.fetch_sub(1, Ordering::Relaxed);
+        signal_remote_wake();
     }
 }
 
 /// Run one client: handshake, then bridge its pane.
-async fn bridge(socket: WebSocket, state: Arc<ServerState>) {
+async fn bridge(socket: WebSocket, state: Arc<ServerState>, mobile: bool) {
     let (mut sink, mut stream) = socket.split();
     let mut global_kill = state.runtime_kill();
     let session = {
@@ -1077,12 +1104,14 @@ async fn bridge(socket: WebSocket, state: Arc<ServerState>) {
         conn_id,
         ConnSlot {
             device_id: session.device_id.clone(),
+            mobile,
             view: view_tx,
             kill: kill_tx.clone(),
             out: out_tx.clone(),
             pending_replay: Arc::clone(&pending_replay),
         },
     );
+    signal_remote_wake();
     // Rebuild this client's screen from the pane's own history so it does not
     // start from a blank terminal. The tail is already buffered here, so no
     // round trip to the GPUI thread is needed.
@@ -1756,11 +1785,52 @@ const INDEX_HTML: &str = r##"<!doctype html>
   #reconnect{background:#101a2b;color:#e8f2ff;border:1px solid #4ea1ff;border-radius:10px;padding:12px 26px;font-size:15px;font-weight:600;letter-spacing:.02em;touch-action:manipulation;user-select:none;-webkit-user-select:none;box-shadow:0 0 0 1px rgba(78,161,255,.25), 0 0 20px rgba(78,161,255,.45), inset 0 0 14px rgba(78,161,255,.12);animation:rcGlow 2.4s ease-in-out infinite;transition:background .15s}
   #reconnect:active{background:#16243a;animation:none;box-shadow:0 0 0 1px rgba(78,161,255,.55), 0 0 30px rgba(78,161,255,.7), inset 0 0 16px rgba(78,161,255,.2)}
   @keyframes rcGlow{0%,100%{box-shadow:0 0 0 1px rgba(78,161,255,.22), 0 0 14px rgba(78,161,255,.32), inset 0 0 12px rgba(78,161,255,.10)}50%{box-shadow:0 0 0 1px rgba(78,161,255,.4), 0 0 28px rgba(78,161,255,.62), inset 0 0 16px rgba(78,161,255,.16)}}
+  :root{color-scheme:light;--outer:#f0f3f0;--surface:#fff;--sidebar:#f8fdf9;--raised:#edf1ee;--edge:#e5eae6;--text:#18181b;--muted:#52525b;--accent:#405eb0;--good:#16803d;--bad:#a32135}
+  :root[data-theme=dark]{color-scheme:dark;--outer:#0a0a0c;--surface:#141415;--sidebar:#0f0f10;--raised:#232325;--edge:#303032;--text:#ededed;--muted:#a1a1a6;--accent:#b4befe;--good:#a6e3a1;--bad:#f38ba8}
+  html,body{background:var(--outer);color:var(--text)}
+  #app{box-sizing:border-box;gap:6px;padding:calc(6px + env(safe-area-inset-top,0px)) 6px calc(6px + env(safe-area-inset-bottom,0px))}
+  #bar,#tabbar,#term,#assist{background:var(--surface);color:var(--text);border-radius:10px}
+  #bar{flex-basis:42px;padding:0 8px;gap:5px}
+  #bar button,#pick button,#new-session,#reconnect,.chip,.key{background:var(--raised);color:var(--text);border:0;border-radius:8px}
+  #bar button,#new-session{min-height:30px;padding:4px 8px}
+  @media(max-width:480px){#dim{display:none}#bar{gap:4px;padding:0 5px}#bar button{padding-inline:5px;font-size:11px}}
+  #dc{color:var(--bad)!important}
+  #tabbar{flex:none;display:flex;align-items:center;gap:6px;padding:4px 6px}
+  #sessions{display:flex;align-items:center;min-width:0;overflow-x:auto;scrollbar-width:none;background:var(--raised);border-radius:18px;padding:3px;gap:2px}
+  #sessions:empty{display:none}
+  .session{display:flex;align-items:center;gap:6px;flex:none;max-width:180px;border:0;border-radius:15px;padding:6px 10px;background:transparent;color:var(--muted)}
+  .session[aria-pressed=true]{background:var(--surface);color:var(--text);font-weight:600}
+  [data-theme=dark] .session[aria-pressed=true]{background:#3a3a3d}
+  .session-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .job-status{font-size:10px;white-space:nowrap;color:var(--good)}
+  .job-status.failed{color:var(--bad)}
+  .job-wave{display:inline-flex;align-items:center;gap:2px;height:10px}
+  .job-wave i{width:3px;height:3px;background:var(--muted);border-radius:50%;animation:job-wave 1s ease-in-out infinite}
+  .job-wave i:nth-child(2){animation-delay:.13s}
+  .job-wave i:nth-child(3){animation-delay:.26s}
+  @keyframes job-wave{0%,55%,100%{transform:translateY(0)}28%{transform:translateY(-3px)}}
+  @media(prefers-reduced-motion:reduce){.job-wave i{animation:none}}
+  #term{padding:6px}
+  #assist{border-top:0;padding-bottom:0}
+  #pick{inset:calc(54px + env(safe-area-inset-top,0px)) 6px 6px;background:var(--sidebar);padding-top:0;border-radius:12px;overflow:hidden}
+  #pick-head,#pick-foot,.pick-item{border-color:var(--edge)}
+  #pick-title,.pick-name,#overlay .box{color:var(--text)}
+  #pick-foot,.pick-sub,.pick-empty,#dim,#ov-sub{color:var(--muted)}
+  .pick-item{margin:4px 6px;border:0;border-radius:9px}
+  .pick-item.on,.pick-item:active,.pick-av,.pick-item.on .pick-av{background:var(--raised);color:var(--text);border:0}
+  .pick-item.on .pick-sub{color:var(--good)}
+  .chip.d,.pick-item.add .pick-av{color:var(--accent)}
+  .key.on{background:var(--accent);color:var(--surface)}
+  #overlay{background:var(--outer)}
+  #reconnect,#reconnect:active{animation:none;box-shadow:none}
+  .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 </style>
 </head>
 <body>
 <div id="app">
-  <div id="bar"><button id="back" title="Terminals" style="display:none">&#9776;</button><span id="msg">Connecting…</span><span id="dim"></span><button id="fdec" title="Smaller text (more columns)">A&#8722;</button><button id="finc" title="Bigger text">A+</button><button id="dc" style="display:none">Disconnect</button></div>
+  <div id="bar"><button id="back" title="Terminals" style="display:none">&#9776;</button><span id="msg">Connecting…</span><span id="dim"></span><button id="fdec" title="Smaller text (more columns)">A&#8722;</button><button id="finc" title="Bigger text">A+</button><button id="mobile-theme" type="button">Dark</button><button id="mobile-sound" type="button" aria-pressed="false">Sound off</button><button id="dc" style="display:none">Disconnect</button></div>
+  <div id="tabbar"><div id="sessions" aria-label="Terminals"></div><button id="new-session" aria-label="New terminal">+</button></div>
+  <div id="job-alert" class="sr-only" role="status"></div>
   <div id="term"></div>
   <div id="assist"><div id="chips"></div><div id="keys"></div></div>
   <div id="pick"><div id="pick-head"><button id="pick-back" title="Back" style="display:none">&#8592;</button><span id="pick-title">Terminals</span><button id="pick-new" title="New terminal">+</button></div><div id="pick-list"></div><div id="pick-foot"></div></div>
@@ -1811,6 +1881,53 @@ const INDEX_HTML: &str = r##"<!doctype html>
   var FONT_KEY='spritx.remote.font';
   var baseFont = (function(){ var v=parseFloat(localStorage.getItem(FONT_KEY)); return (v>=6 && v<=24) ? v : (small?11:13); })();
   var term = new Terminal({ cursorBlink:true, fontSize: baseFont, fontFamily:'ui-monospace,monospace', scrollback:2000, theme:{background:'#0e1014',foreground:'#e6e6e6'} });
+  function readPref(key){try{return localStorage.getItem(key);}catch(_){return null;}}
+  function savePref(key,value){try{localStorage.setItem(key,value);}catch(_){}}
+  var mobileDark=readPref('spritx.remote.theme')==='dark';
+  var mobileSound=readPref('spritx.remote.sound')==='on';
+  var completionSeen=null, audioContext=null;
+  function applyMobileTheme(){
+    document.documentElement.dataset.theme=mobileDark?'dark':'light';
+    $('mobile-theme').textContent=mobileDark?'Light':'Dark';
+    $('mobile-theme').setAttribute('aria-label',mobileDark?'Switch to light theme':'Switch to dark theme');
+    term.options.theme=mobileDark
+      ? {background:'#141415',foreground:'#ededed',cursor:'#ededed',selectionBackground:'#45475a'}
+      : {background:'#ffffff',foreground:'#18181b',cursor:'#18181b',selectionBackground:'#bfd3f5',
+         black:'#18181b',red:'#b91c1c',green:'#166534',yellow:'#854d0e',blue:'#1d4ed8',magenta:'#86198f',cyan:'#155e75',white:'#52525b',
+         brightBlack:'#3f3f46',brightRed:'#dc2626',brightGreen:'#15803d',brightYellow:'#a16207',brightBlue:'#2563eb',brightMagenta:'#a21caf',brightCyan:'#0e7490',brightWhite:'#71717a'};
+  }
+  function applyMobileSound(){
+    $('mobile-sound').textContent=mobileSound?'Sound on':'Sound off';
+    $('mobile-sound').setAttribute('aria-pressed',String(mobileSound));
+  }
+  function unlockAudio(){
+    if(!mobileSound) return;
+    try{
+      var Audio=window.AudioContext||window.webkitAudioContext;
+      if(Audio && !audioContext) audioContext=new Audio();
+      if(audioContext && audioContext.state==='suspended') audioContext.resume().catch(function(){});
+    }catch(_){}
+  }
+  function completionChime(){
+    if(!mobileSound||!audioContext||audioContext.state!=='running') return;
+    var start=audioContext.currentTime;
+    var tone=audioContext.createOscillator(), gain=audioContext.createGain();
+    tone.frequency.setValueAtTime(660,start);
+    tone.frequency.setValueAtTime(880,start+.08);
+    gain.gain.setValueAtTime(.001,start);
+    gain.gain.linearRampToValueAtTime(.045,start+.02);
+    gain.gain.exponentialRampToValueAtTime(.001,start+.20);
+    tone.connect(gain); gain.connect(audioContext.destination);
+    tone.start(start); tone.stop(start+.21);
+  }
+  applyMobileTheme(); applyMobileSound();
+  $('mobile-theme').addEventListener('click',function(){
+    mobileDark=!mobileDark; savePref('spritx.remote.theme',mobileDark?'dark':'light'); applyMobileTheme();
+  });
+  $('mobile-sound').addEventListener('click',function(){
+    mobileSound=!mobileSound; savePref('spritx.remote.sound',mobileSound?'on':'off'); applyMobileSound(); unlockAudio();
+  });
+  document.addEventListener('pointerup',unlockAudio);
   var fit = new FitAddon.FitAddon();
   term.loadAddon(fit); term.open(termEl);
   // The default renderer redraws the grid through the DOM: a fullscreen TUI
@@ -1942,7 +2059,20 @@ const INDEX_HTML: &str = r##"<!doctype html>
       try{term.reset();}catch(e){}
       curLine=''; chipsEl.innerHTML=''; lastActive=active;
     }
-    pickItems = items||[]; pickActive = active; renderPicker();
+    pickItems = items||[]; pickActive = active;
+    var nextSeen=new Map(), latest=null;
+    pickItems.forEach(function(it){
+      var completed=it.activity && it.activity.completed || 0;
+      nextSeen.set(it.id,completed);
+      if(completionSeen && completed>(completionSeen.get(it.id)||0) &&
+          (!latest||completed>latest.activity.completed)) latest=it;
+    });
+    completionSeen=nextSeen;
+    if(latest){
+      $('job-alert').textContent=(latest.tab||latest.title)+(latest.activity.exitCode===0?' finished':' failed');
+      completionChime();
+    }
+    renderSessions(); renderPicker();
   }
 
   // --- messaging-style terminal picker (the landing screen) ---
@@ -1958,6 +2088,38 @@ const INDEX_HTML: &str = r##"<!doctype html>
     });
     return g;
   }
+  function addJobStatus(el,panes){
+    var activity=panes.map(function(p){return p.activity||{};});
+    var status=document.createElement('span');
+    if(activity.some(function(a){return a.running;})){
+      status.className='job-wave'; status.setAttribute('aria-label','Running');
+      for(var i=0;i<3;i++) status.appendChild(document.createElement('i'));
+    }else{
+      var done=activity.reduce(function(best,a){return a.completed&&(!best||a.completed>best.completed)?a:best;},null);
+      if(!done) return;
+      status.className='job-status'+(done.exitCode===0?'':' failed');
+      status.textContent=done.exitCode===0?'Done':'Failed';
+    }
+    el.appendChild(status);
+  }
+  function renderSessions(){
+    var strip=$('sessions'), scroll=strip.scrollLeft;
+    strip.replaceChildren();
+    groupTabs().forEach(function(gr){
+      var tab=document.createElement('button');
+      var selected=gr.panes.some(function(p){return p.id===pickActive;});
+      tab.type='button'; tab.className='session'; tab.setAttribute('aria-pressed',String(selected));
+      var title=document.createElement('span');
+      title.className='session-label'; title.textContent=gr.name;
+      tab.appendChild(title); addJobStatus(tab,gr.panes);
+      tab.addEventListener('click',function(){if(gr.panes.length>1) openPicker(); openTabGroup(gr);});
+      strip.appendChild(tab);
+    });
+    strip.scrollLeft=scroll;
+  }
+  $('new-session').addEventListener('click',function(){
+    if(ready){ wsSend(String.fromCharCode(0,4)); closePicker(); pickTerminalFocus(); }
+  });
   function makeRow(avText, name, sub, onRow){
     var row=document.createElement('div'); row.className='pick-item'+(onRow&&onRow.on?' on':'');
     var av=document.createElement('div'); av.className='pick-av'; av.textContent=avText;
@@ -1984,9 +2146,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
     groups.forEach(function(gr, i){
       var live = gr.panes.some(function(p){ return p.id===pickActive; });
       var n = gr.panes.length;
-      pickList.appendChild(makeRow(String(i+1), gr.name,
+      var row=makeRow(String(i+1), gr.name,
         live ? '● live now' : (n + (n===1?' terminal':' terminals')),
-        { on: live, fn: function(){ openTabGroup(gr); } }));
+        { on: live, fn: function(){ openTabGroup(gr); } });
+      addJobStatus(row,gr.panes); pickList.appendChild(row);
     });
     var add=makeRow('+','New terminal','start a fresh shell',{ fn: function(){ wsSend(String.fromCharCode(0,4)); closePicker(); pickTerminalFocus(); } });
     add.className='pick-item add';
@@ -2020,7 +2183,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
     // stored pickActive are both numbers but may differ in type after null
     // transitions; String() comparison is safe for all values including null.
     if(String(id)!==String(pickActive)){ pickActive=id; wsSend(String.fromCharCode(0,3)+id); }
-    closePicker(); pickTerminalFocus(); renderPicker(); settle();
+    closePicker(); pickTerminalFocus(); renderSessions(); renderPicker(); settle();
   }
 
   // --- extra keys (Termux-style) ---
@@ -2153,8 +2316,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
   })();
 
   var overlay=$('overlay'), ovTitle=$('ov-title'), ovSub=$('ov-sub'), ovIcon=$('ov-icon');
-  var WARN_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
-  var PLUG_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6"/><path d="M6 8h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6z"/><line x1="12" y1="17" x2="12" y2="22"/></svg>';
+  var WARN_SVG="<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\"><path d=\"M13.9248 21H10.0752C5.44476 21 3.12955 21 2.27636 19.4939C1.42317 17.9879 2.60736 15.9914 4.97574 11.9985L6.90057 8.75333C9.17559 4.91778 10.3131 3 12 3C13.6869 3 14.8244 4.91777 17.0994 8.75332L19.0243 11.9985C21.3926 15.9914 22.5768 17.9879 21.7236 19.4939C20.8704 21 18.5552 21 13.9248 21Z\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" /><path d=\"M12 9V13\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" /><path d=\"M12.125 16.75H12M12.25 16.75C12.25 16.8881 12.1381 17 12 17C11.8619 17 11.75 16.8881 11.75 16.75C11.75 16.6119 11.8619 16.5 12 16.5C12.1381 16.5 12.25 16.6119 12.25 16.75Z\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" /></svg>";
+  var PLUG_SVG="<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\"><path d=\"M15.5 2V6M8.5 6V2\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" /><path d=\"M6.00446 7.61331C5.93719 6.74273 6.63957 6 7.53014 6H16.4699C17.3604 6 18.0628 6.74273 17.9955 7.61331L17.8117 9.99197C17.6796 11.7019 17.1011 13.3498 16.132 14.7773L15.5312 15.6622C14.9638 16.4979 14.0077 17 12.9838 17H11.0162C9.99228 17 9.03617 16.4979 8.46881 15.6622L7.86803 14.7773C6.89885 13.3498 6.32041 11.7019 6.18827 9.99197L6.00446 7.61331Z\" stroke=\"currentColor\" stroke-width=\"1.5\" /><path d=\"M12 17V22\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" /><path d=\"M11 9H13\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" /></svg>";
   // kind: 'user' (Disconnect), 'lost' (network), or a {title, sub, retry} object.
   function showOverlay(kind){
     var o = kind==='user' ? {icon:PLUG_SVG, title:'Disconnected', sub:"You are disconnected from the remote terminal.", retry:true}
@@ -2168,6 +2331,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
   function hideOverlay(){ overlay.style.display='none'; }
   var fatal=null; // a handshake refusal: shown instead of "connection lost"
   function connect(){
+    completionSeen=null;
     if(ws){
       try {
         ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null;

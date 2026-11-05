@@ -315,20 +315,66 @@ impl Default for TerminalTheme {
     }
 }
 
-static TERM_THEME: OnceLock<RwLock<TerminalTheme>> = OnceLock::new();
-
-fn term_theme_slot() -> &'static RwLock<TerminalTheme> {
-    TERM_THEME.get_or_init(|| RwLock::new(TerminalTheme::default()))
+struct TerminalThemeState {
+    configured: TerminalTheme,
+    effective: TerminalTheme,
+    light_workspace: bool,
 }
 
-/// Snapshot the active terminal theme.
+fn term_theme_slot() -> &'static RwLock<TerminalThemeState> {
+    static SLOT: OnceLock<RwLock<TerminalThemeState>> = OnceLock::new();
+    SLOT.get_or_init(|| {
+        let configured = TerminalTheme::default();
+        RwLock::new(TerminalThemeState {
+            configured,
+            effective: configured,
+            light_workspace: false,
+        })
+    })
+}
+
+/// The saved palette, used by the Appearance editor and config export.
+pub fn configured_term_theme() -> TerminalTheme {
+    term_theme_slot().read().expect("theme lock").configured
+}
+
+pub fn set_light_workspace(light: bool) {
+    let mut state = term_theme_slot().write().expect("theme lock");
+    state.light_workspace = light;
+    state.effective = matching_term_theme(state.configured, light);
+}
+
 pub fn term_theme() -> TerminalTheme {
-    *term_theme_slot().read().expect("theme lock")
+    term_theme_slot().read().expect("theme lock").effective
+}
+
+/// Use the configured palette when it matches the workspace, otherwise use
+/// a matching palette without replacing the user's saved colors.
+fn matching_term_theme(configured: TerminalTheme, light: bool) -> TerminalTheme {
+    if (configured.background.l >= 0.5) == light {
+        return configured;
+    }
+    if !light {
+        return crate::theme_presets::PRESETS[0].theme();
+    }
+    TerminalTheme {
+        background: rgb(0xffffff).into(),
+        foreground: rgb(0x18181b).into(),
+        cursor: rgb(0x18181b).into(),
+        selection: rgb(0xbfd3f5).into(),
+        accent: rgb(0x405eb0).into(),
+        ansi: [
+            0x18181b, 0xb91c1c, 0x166534, 0x854d0e, 0x1d4ed8, 0x86198f, 0x155e75, 0x52525b,
+            0x3f3f46, 0xdc2626, 0x15803d, 0xa16207, 0x2563eb, 0xa21caf, 0x0e7490, 0x71717a,
+        ].map(|color| rgb(color).into()),
+    }
 }
 
 /// Replace the terminal theme. Call at startup and whenever Settings are saved.
 pub fn set_term_theme(theme: TerminalTheme) {
-    *term_theme_slot().write().expect("theme lock") = theme;
+    let mut state = term_theme_slot().write().expect("theme lock");
+    state.configured = theme;
+    state.effective = matching_term_theme(theme, state.light_workspace);
 }
 
 /// Wake signal the PTY reader fires the instant new output lands, so the UI
@@ -813,11 +859,12 @@ impl TerminalSession {
         if screen.alternate_screen() || screen.scrollback() > 0 {
             return None;
         }
-        let (cursor_row, _) = self.visible_cursor()?;
-        for distance in 1..=4 {
-            let Some(header) = cursor_row.checked_sub(distance) else { break };
-            if header > 0
-                && screen.cell(header, 0).is_some_and(|cell| cell.contents() == "")
+        // Shell line editors temporarily hide the caret while repainting input.
+        // The prompt layout must not follow that visibility flag or stop
+        // matching when an input line wraps.
+        let (cursor_row, _) = screen.cursor_position();
+        for header in (1..cursor_row).rev() {
+            if screen.cell(header, 0).is_some_and(|cell| cell.contents() == "")
                 && screen.cell(header + 1, 0).is_some_and(|cell| cell.contents() == "❯")
             {
                 return Some(header);
@@ -957,7 +1004,7 @@ fn shell_setup(shell: &str) -> (Vec<String>, Vec<(String, String)>) {
                 ]);
             }
         }
-        return (args, Vec::new());
+        return (args, vec![("SPRITX_COMMAND_TRACKING".into(), "1".into())]);
     }
     if crate::platform::shell_kind(shell) == crate::platform::ShellKind::Cmd {
         return (vec!["/D".into()], Vec::new());

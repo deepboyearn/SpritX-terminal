@@ -58,7 +58,7 @@ pub struct SplitDragState {
 /// Everything the UI mirrors from the remote server: running, connected
 /// clients, a pairing code being open, and its remaining seconds. The countdown
 /// is part of the stamp so it ticks without an external repaint nudge.
-type RemoteStamp = (bool, usize, bool, Option<u64>);
+type RemoteStamp = (bool, usize, bool, Option<u64>, Vec<u64>);
 
 pub struct SpritXApp {
     pub theme: Theme,
@@ -71,6 +71,7 @@ pub struct SpritXApp {
     pub cursor_blink_epoch: std::time::Instant,
     pub file_tree_visible: bool,
     pub file_tree_width: f32,
+    pub file_list_collapsed: bool,
     pub modal: Option<Modal>,
     pub layouts_open: bool,
     pub remote_menu_open: bool,
@@ -114,6 +115,8 @@ pub struct SpritXApp {
     pub recording_action: Option<String>,
     pub file_tree_ui: Option<String>,
     pub tab_scroll: ScrollHandle,
+    command_completion: u64,
+    pub(super) tab_highlight: std::rc::Rc<std::cell::RefCell<Option<super::tab_bar::TabHighlight>>>,
     pub tab_menu: Option<TabMenuState>,
     pub pane_menu: Option<PaneMenuState>,
     pub editing_tab: Option<TabId>,
@@ -127,7 +130,6 @@ pub struct SpritXApp {
 
 impl SpritXApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let theme = Theme::dark();
         if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
             include_bytes!("../../assets/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf"),
         )]) {
@@ -138,6 +140,12 @@ impl SpritXApp {
         available_fonts.sort();
         available_fonts.dedup();
         let mut app_config = AppConfig::load();
+        crate::terminal::set_light_workspace(app_config.appearance.light_workspace);
+        let theme = if app_config.appearance.light_workspace {
+            Theme::light()
+        } else {
+            Theme::dark()
+        };
         // Upgrade the former stock theme; custom themes remain available.
         if theme_index_for(&app_config.appearance.theme) == 1 {
             write_theme(&mut app_config, &crate::theme_presets::PRESETS[0].theme());
@@ -169,7 +177,8 @@ impl SpritXApp {
             cursor_blink_on: true,
             cursor_blink_epoch: std::time::Instant::now(),
             file_tree_visible: true,
-            file_tree_width: 240.0,
+            file_tree_width: 230.0,
+            file_list_collapsed: false,
             modal: match std::env::var("SPRITX_OPEN").as_deref() {
                 Ok("settings") => Some(Modal::Settings),
                 Ok("palette") => Some(Modal::Palette(PaletteMode::Command)),
@@ -205,6 +214,8 @@ impl SpritXApp {
             recording_action: None,
             file_tree_ui: None,
             tab_scroll: ScrollHandle::new(),
+            command_completion: 0,
+            tab_highlight: Default::default(),
             tab_menu: None,
             pane_menu: None,
             editing_tab: None,
@@ -360,10 +371,7 @@ impl SpritXApp {
             crate::metrics::probe("pump.vt", parse_us);
             crate::metrics::add(crate::metrics::Name::PumpVt, parse_us as u64);
         }
-        if updates.is_empty() {
-            return pumped;
-        }
-
+        let had_output = !updates.is_empty();
         for (leaf, bytes) in updates {
             // Fan the same bytes out to remote clients: the UI parser already
             // consumed them in `pump_bytes`, this only notifies bridges.
@@ -371,11 +379,23 @@ impl SpritXApp {
                 server.ingest(leaf, &bytes);
             }
             let osc_started = std::time::Instant::now();
-            let (blocks, cwd) = {
+            let (events, blocks, cwd) = {
                 let tracker = self.block_trackers.entry(leaf).or_default();
-                tracker.feed(&bytes);
-                (tracker.take_blocks(), tracker.current_cwd().map(str::to_string))
+                let events = tracker.feed(&bytes).events;
+                (events, tracker.take_blocks(), tracker.current_cwd().map(str::to_string))
             };
+            for event in events {
+                use crate::backend::osc::OscEvent;
+                match event.event {
+                    OscEvent::OutputStart => {
+                        if let Some(state) = self.leaf_mut(leaf) {
+                            state.activity.running = true;
+                        }
+                    }
+                    OscEvent::OutputEnd { exit_code } => self.complete_terminal_command(leaf, exit_code),
+                    _ => {}
+                }
+            }
             let osc_us = crate::metrics::micros(osc_started.elapsed());
             if crate::metrics::enabled() {
                 crate::metrics::probe("pump.osc", osc_us);
@@ -392,7 +412,33 @@ impl SpritXApp {
                 self.append_history(&block);
             }
         }
-        true
+        let exited: Vec<_> = self.tabs.iter().flat_map(|tab| tab.leaves.values())
+            .filter(|leaf| leaf.activity.running)
+            .filter_map(|leaf| Some((leaf.id, self.sessions.get(&leaf.id)?.exit_code()?)))
+            .collect();
+        let changed = had_output || !exited.is_empty();
+        for (leaf, exit_code) in exited {
+            self.complete_terminal_command(leaf, exit_code);
+        }
+        if changed {
+            self.refresh_remote_tabs();
+        }
+        changed || pumped
+    }
+
+    fn complete_terminal_command(&mut self, leaf: u64, exit_code: i32) {
+        if !self.tabs.iter().any(|tab| tab.leaves.get(&leaf).is_some_and(|state| state.activity.running)) {
+            return;
+        }
+        self.command_completion += 1;
+        let completed = self.command_completion;
+        let Some(state) = self.leaf_mut(leaf) else { return };
+        state.activity.running = false;
+        state.activity.completed = completed;
+        state.activity.exit_code = Some(exit_code);
+        if self.settings.notify_sound {
+            crate::platform::play_completion_sound();
+        }
     }
 
     fn leaf_mut(&mut self, leaf: u64) -> Option<&mut LeafState> {
@@ -432,7 +478,7 @@ impl SpritXApp {
         crate::metrics::event("action.save_settings");
         let mut config = AppConfig::load();
         apply_settings(&mut config, &self.settings);
-        write_theme(&mut config, &crate::terminal::term_theme());
+        write_theme(&mut config, &crate::terminal::configured_term_theme());
         let _ = config.save();
         crate::terminal::set_appearance(terminal_appearance_from_config(&config, &self.settings_fonts));
     }
@@ -461,7 +507,7 @@ impl SpritXApp {
 
     /// Replace one of the five primary terminal colors (color picker).
     pub fn set_theme_color(&mut self, key: ThemeColorKey, value: u32, cx: &mut Context<Self>) {
-        let mut theme = crate::terminal::term_theme();
+        let mut theme = crate::terminal::configured_term_theme();
         let color: gpui::Hsla = gpui::rgb(value).into();
         match key {
             ThemeColorKey::Background => theme.background = color,
@@ -507,6 +553,12 @@ impl SpritXApp {
 
     /// Replace the settings snapshot from a freshly loaded config.
     fn reload_from_config(&mut self, config: &AppConfig, cx: &mut Context<Self>) {
+        crate::terminal::set_light_workspace(config.appearance.light_workspace);
+        self.theme = if config.appearance.light_workspace {
+            Theme::light()
+        } else {
+            Theme::dark()
+        };
         self.settings = settings_from_config(config);
         self.selected_theme = theme_index_for(&config.appearance.theme);
         crate::terminal::set_appearance(terminal_appearance_from_config(config, &self.settings_fonts));
@@ -558,7 +610,7 @@ impl SpritXApp {
     pub fn export_config(&mut self, cx: &mut Context<Self>) {
         let mut config = AppConfig::load();
         apply_settings(&mut config, &self.settings);
-        write_theme(&mut config, &crate::terminal::term_theme());
+        write_theme(&mut config, &crate::terminal::configured_term_theme());
         let json = match config.export_json() {
             Ok(json) => json,
             Err(error) => {
@@ -788,11 +840,14 @@ impl SpritXApp {
 
     /// Paste the clipboard into the active terminal (Ctrl+Shift+V).
     pub fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            if !text.is_empty() {
-                self.write_active(text.as_bytes());
-            }
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()).filter(|text| !text.is_empty()) else {
+            self.show_toast("Clipboard has no text to paste", cx);
+            return;
+        };
+        if !self.write_active(text.as_bytes()) {
+            self.show_toast("Could not paste into this terminal", cx);
         }
+        cx.notify();
     }
 
     /// Zoom the terminal font by `delta` pixels (Ctrl + / Ctrl -).
@@ -1343,6 +1398,22 @@ impl SpritXApp {
         cx.notify();
     }
 
+    pub fn toggle_workspace_theme(&mut self, cx: &mut Context<Self>) {
+        let mut config = AppConfig::load();
+        config.appearance.light_workspace = !config.appearance.light_workspace;
+        if let Err(error) = config.save() {
+            self.show_toast(format!("Could not save workspace theme: {error}"), cx);
+            return;
+        }
+        crate::terminal::set_light_workspace(config.appearance.light_workspace);
+        self.theme = if config.appearance.light_workspace {
+            Theme::light()
+        } else {
+            Theme::dark()
+        };
+        cx.notify();
+    }
+
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
@@ -1360,8 +1431,22 @@ impl SpritXApp {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .gap(px(8.))
-                    .child(super::pane_tree::render(self, cx)),
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(self.theme.border)
+                    .bg(self.theme.bg)
+                    .overflow_hidden()
+                    .child(crate::metrics::tab_bar(|| super::tab_bar::render(self, cx)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .p(body_pad())
+                            .child(super::pane_tree::render(self, cx)),
+                    )
+                    .child(self.render_status_hint()),
             )
             .into_any_element()
     }
@@ -1404,7 +1489,7 @@ impl SpritXApp {
             .into_any_element()
     }
 
-    fn render_root_overlays(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_root_overlays(&self, viewport: gpui::Size<gpui::Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut overlays = Vec::new();
         let popup_open = self.layouts_open || self.remote_menu_open;
         if popup_open {
@@ -1423,7 +1508,7 @@ impl SpritXApp {
             overlays.push(deferred(super::tab_bar::render_context_menu(self, menu, cx)).into_any_element());
         }
         if let Some(menu) = &self.pane_menu {
-            overlays.push(deferred(super::pane_tree::render_context_menu(self, menu, cx)).into_any_element());
+            overlays.push(deferred(super::pane_tree::render_context_menu(self, menu, viewport, cx)).into_any_element());
         }
         if let Some(toast) = &self.toast {
             overlays.push(super::overlays::render_toast(self, &toast.message));
@@ -1450,7 +1535,8 @@ impl Render for SpritXApp {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.bg)
+            .bg(theme.outer)
+            .font_family(crate::terminal::appearance().font_family)
             .text_color(theme.fg)
             .text_size(px(12.5))
             .on_mouse_down(
@@ -1705,10 +1791,8 @@ impl Render for SpritXApp {
                     this.type_key(event, cx);
                 }
             }))
-            .child(crate::metrics::tab_bar(|| super::tab_bar::render(self, cx)))
             .child(self.render_body(cx))
-            .child(self.render_status_hint())
-            .children(self.render_root_overlays(cx));
+            .children(self.render_root_overlays(window.viewport_size(), cx));
         crate::metrics::frame_end();
         root
     }
@@ -2370,6 +2454,8 @@ impl SpritXApp {
                 mix(&leaf.to_string());
                 if let Some(state) = tab.leaves.get(&leaf) {
                     mix(&state.cwd);
+                    mix(&state.activity.running.to_string());
+                    mix(&state.activity.completed.to_string());
                 }
             }
         }
@@ -2393,6 +2479,7 @@ impl SpritXApp {
                     title,
                     tab: tab.title.clone(),
                     tab_id: tab.id,
+                    activity: tab.leaves.get(&leaf).map_or_else(Default::default, |state| state.activity),
                 });
             }
         }
@@ -2469,7 +2556,12 @@ impl SpritXApp {
             status.clients,
             status.pair_url.is_some(),
             status.pairing_expires_in,
+            self.remote_server.as_ref().map_or_else(Vec::new, RemoteServer::mobile_client_panes),
         )
+    }
+
+    pub(super) fn mobile_client_panes(&self) -> &[u64] {
+        &self.remote_status_stamp.4
     }
 }
 

@@ -5,6 +5,22 @@ if (-not $global:SpritXPromptEnabled) {
     $global:SpritXOriginalPrompt = $function:prompt
     $global:SpritXNodeDirectory = $null
     $global:SpritXNodeVersion = $null
+    $global:SpritXCommandRunning = $false
+    if ($env:SPRITX_COMMAND_TRACKING -eq '1') {
+        Import-Module PSReadLine -ErrorAction SilentlyContinue
+        $readLine = Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction SilentlyContinue
+        if ($readLine) {
+            $global:SpritXOriginalReadLine = $readLine.ScriptBlock
+            function global:PSConsoleHostReadLine {
+                $line = & $global:SpritXOriginalReadLine
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    [Console]::Write([string][char]27 + ']133;C' + [char]7)
+                    $global:SpritXCommandRunning = $true
+                }
+                return $line
+            }
+        }
+    }
     function global:Get-SpritXCells([string]$Text) {
         try { return $Host.UI.RawUI.LengthInBufferCells($Text) } catch { return $Text.Length }
     }
@@ -76,6 +92,11 @@ if (-not $global:SpritXPromptEnabled) {
     }
     function global:prompt {
         $succeeded = $?
+        if ($global:SpritXCommandRunning) {
+            $global:SpritXCommandRunning = $false
+            $status = if ($succeeded) { 0 } else { 1 }
+            [Console]::Write([string][char]27 + ']133;D;' + $status + [char]7)
+        }
         Compress-SpritXPromptGap
         $e = [string][char]27
         $location = Get-Location

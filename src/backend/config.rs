@@ -49,6 +49,7 @@ impl AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppearanceConfig {
+    pub light_workspace: bool,
     pub font_family: String,
     pub font_size: u16,
     /// Tracks one-time updates to the terminal's requested default size.
@@ -64,6 +65,7 @@ pub struct AppearanceConfig {
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
+            light_workspace: false,
             // Lead with a family that is actually installed and monospace.
             font_family:
                 r#""JetBrainsMonoNL Nerd Font Mono", "JetBrainsMonoNL NFM", "JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace"#

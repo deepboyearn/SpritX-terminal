@@ -25,7 +25,7 @@ use crate::state::{
     LAYOUT_PRESETS, Modal, PaletteMode, SettingsField, SettingsMenu, SettingsSection,
     ThemeColorKey,
 };
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 
 const OVERLAY_Z: usize = 120;
 const TOP_OFFSET: f32 = 108.0;
@@ -215,7 +215,6 @@ fn kbd(theme: Theme, keys: impl Into<String>) -> Div {
         .border_1()
         .border_color(theme.border)
         .bg(theme.white_06)
-        .font_family(MONO_FONT)
         .text_size(px(10.))
         .text_color(theme.fg_dim)
         .child(keys.into())
@@ -265,7 +264,6 @@ fn esc_chip(theme: Theme) -> AnyElement {
         .px(px(7.))
         .rounded(px(4.))
         .bg(theme.white_06)
-        .font_family(MONO_FONT)
         .text_size(px(10.))
         .text_color(theme.fg_dim)
         .child("Esc")
@@ -375,7 +373,8 @@ pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> Any
         .child(body)
         .into_any_element();
 
-    popup_layer("layouts-popup", 38.0, Some(48.0), None, 372.0, shell)
+    let header_bottom = f32::from(crate::theme::body_pad() + crate::theme::tab_bar_h());
+    popup_layer("layouts-popup", header_bottom, Some(84.0), None, 372.0, shell)
 }
 
 fn layout_preview(theme: Theme, hint: &'static str) -> AnyElement {
@@ -517,7 +516,6 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
                     .child(
                         div()
                             .text_size(px(10.))
-                            .font_family(MONO_FONT)
                             .text_color(if connected { theme.success } else { theme.warning })
                             .child(if connected { "E2E" } else { "WAITING" }),
                     ),
@@ -564,7 +562,6 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
                     )
                     .child(
                         div()
-                            .font_family(MONO_FONT)
                             .text_size(px(11.))
                             .text_color(theme.accent)
                             .overflow_hidden()
@@ -663,7 +660,10 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
 
     match app.remote_menu_at {
         Some((x, y)) => popup_layer("remote-menu", y, None, Some(x), 340.0, shell),
-        None => popup_layer("remote-menu", 38.0, Some(76.0), None, 340.0, shell),
+        None => {
+            let header_bottom = f32::from(crate::theme::body_pad() + crate::theme::tab_bar_h());
+            popup_layer("remote-menu", header_bottom, Some(120.0), None, 340.0, shell)
+        }
     }
 }
 
@@ -831,7 +831,6 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
                 .w(px(16.))
                 .flex()
                 .justify_center()
-                .font_family(MONO_FONT)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(15.))
                 .text_color(theme.warning)
@@ -974,7 +973,6 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
                             .flex()
                             .justify_center()
                             .text_size(px(10.5))
-                            .font_family(MONO_FONT)
                             .text_color(if code == 0 { theme.success } else { theme.danger })
                             .child(if code == 0 {
                                 "✓".to_string()
@@ -991,7 +989,6 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
                             .gap(px(2.))
                             .child(
                                 div()
-                                    .font_family(MONO_FONT)
                                     .text_size(px(12.))
                                     .text_color(theme.fg)
                                     .overflow_hidden()
@@ -1137,7 +1134,6 @@ fn palette_action_row(
     if !shortcut.is_empty() {
         row = row.child(
             div()
-                .font_family(MONO_FONT)
                 .text_size(px(10.))
                 .text_color(theme.fg_dim)
                 .child(shortcut),
@@ -1170,22 +1166,22 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .flex()
         .flex_col()
         .flex_none()
-        .w(px(178.))
+        .w(px(176.))
         .h_full()
-        .gap(px(2.))
+        .gap(px(4.))
         .p(px(12.))
         .bg(theme.bg_soft)
         .border_r_1()
         .border_color(theme.border)
         .child(
             div()
-                .px(px(10.))
+                .px(px(8.))
                 .pt(px(4.))
-                .pb(px(10.))
-                .text_size(px(11.))
+                .pb(px(8.))
+                .text_size(px(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.fg_dim)
-                .child("SETTINGS"),
+                .child("Settings"),
         );
 
     for (index, (section, ic)) in SETTINGS_SECTIONS.into_iter().enumerate() {
@@ -1195,50 +1191,49 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                 .id(("settings-nav", index))
                 .flex()
                 .items_center()
-                .gap(px(9.))
+                .gap(px(8.))
                 .h(px(32.))
-                .px(px(10.))
+                .px(px(8.))
                 .rounded(px(6.))
                 .cursor_pointer()
-                .text_size(px(12.5))
+                .text_size(px(12.))
                 .text_color(if selected { theme.fg } else { theme.fg_dim })
-                .when(selected, |d| d.bg(theme.accent.opacity(0.14)))
+                .when(selected, |d| d.bg(theme.accent.opacity(0.14)).font_weight(FontWeight::MEDIUM))
                 .hover(|s| s.bg(theme.white_06).text_color(theme.fg))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings_section = section;
+                    if this.settings_section != section {
+                        this.commit_settings_field(cx);
+                        if this.settings_field.is_some() {
+                            return;
+                        }
+                        this.settings_section = section;
+                        this.settings_menu = None;
+                        this.recording_action = None;
+                    }
                     cx.notify();
                 }))
                 .child(icon(
                     ic,
-                    15.0,
+                    16.0,
                     if selected { theme.accent } else { theme.fg_dim },
                 ))
                 .child(section.label()),
         );
     }
 
-    sidebar = sidebar.child(div().flex_1()).child(
-        text_button("settings-close-side", "Close (Esc)", &theme)
-            .w_full()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.modal = None;
-                cx.notify();
-            })),
-    );
-
     let content = div()
-        .id("settings-scroll")
         .flex()
         .flex_col()
         .flex_1()
         .min_w_0()
         .min_h_0()
-        .overflow_y_scroll()
         .child(
             div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .justify_between()
+                .gap(px(12.))
                 .px(px(24.))
                 .py(px(16.))
                 .border_b_1()
@@ -1247,26 +1242,33 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(2.))
+                        .min_w_0()
+                        .gap(px(4.))
                         .child(
                             div()
-                                .text_size(px(16.))
+                                .text_size(px(20.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(app.settings_section.label()),
                         )
                         .child(
                             div()
-                                .text_size(px(10.5))
+                                .text_size(px(12.))
                                 .text_color(theme.fg_dim)
-                                .child("Changes are stored in ~/.config/spritx/config.toml"),
+                                .child(settings_summary(app.settings_section)),
                         ),
                 )
                 .child(
                     div()
                         .id("settings-close")
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .rounded(px(6.))
                         .cursor_pointer()
                         .text_color(theme.fg_dim)
-                        .hover(|s| s.text_color(theme.fg))
+                        .hover(|s| s.bg(theme.white_06).text_color(theme.fg))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.modal = None;
                             cx.notify();
@@ -1276,9 +1278,12 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         )
         .child(
             div()
+                .id(("settings-scroll", app.settings_section as usize))
                 .flex()
                 .flex_col()
-                .gap(px(14.))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
                 .p(px(24.))
                 .child(settings_content(app, cx)),
         );
@@ -1287,6 +1292,7 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .flex()
         .flex_row()
         .size_full()
+        .font_family(crate::terminal::appearance().font_family)
         .child(sidebar)
         .child(content)
         .into_any_element();
@@ -1294,14 +1300,28 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     side_layer("settings-layer", theme, 860.0, panel, cx)
 }
 
+fn settings_summary(section: SettingsSection) -> &'static str {
+    match section {
+        SettingsSection::Appearance => "Workspace font, terminal colors and cursor",
+        SettingsSection::Shell => "Executable and arguments for new terminals",
+        SettingsSection::Notifications => "Command alerts and completion sound",
+        SettingsSection::FileTree => "Commands for files and folders",
+        SettingsSection::Remote => "Sharing, pairing and connected devices",
+        SettingsSection::History => "Local command history and excluded patterns",
+        SettingsSection::Keys => "Keyboard bindings and fixed shortcuts",
+        SettingsSection::General => "Workspace behavior and configuration",
+        SettingsSection::About => "Version, configuration folder and licenses",
+    }
+}
+
 fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
     let section = app.settings_section;
-    let mut body = div().flex().flex_col().gap(px(14.));
+    let mut body = div().flex().flex_col().flex_none().gap(px(8.));
 
     match section {
         SettingsSection::Appearance => {
-            let term_theme = crate::terminal::term_theme();
+            let term_theme = crate::terminal::configured_term_theme();
             let font_label = crate::terminal::appearance().font_family.to_string();
             let size_editing = matches!(app.settings_field, Some(SettingsField::FontSize));
             let size_value = if size_editing {
@@ -1316,10 +1336,11 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 app.settings.scrollback.to_string()
             };
             body = body
+                .child(settings_group(theme, "Typography"))
                 .child(setting_row(
                     theme,
-                    "Font",
-                    "Monospace font used by every terminal",
+                    "Font family",
+                    "Used across the desktop workspace and terminal panes",
                     div()
                         .flex()
                         .gap(px(8.))
@@ -1353,7 +1374,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 ))
                 .child(setting_row(
                     theme,
-                    "Size",
+                    "Terminal font size",
                     "Terminal text size in pixels (8–40)",
                     div()
                         .flex()
@@ -1389,9 +1410,10 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 ))
                 .child(textual_row(
                     theme,
-                    "Preview",
-                    "The quick brown fox jumps over the lazy dog — 0123456789",
+                    "Terminal preview",
+                    app.settings.font_size,
                 ))
+                .child(settings_group(theme, "Cursor and scrollback"))
                 .child(setting_row(
                     theme,
                     "Cursor style",
@@ -1446,7 +1468,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         }),
                     ),
                 ))
-                .child(section_header(theme, "Theme"))
+                .child(settings_group(theme, "Terminal theme"))
                 .child(
                     div()
                         .flex()
@@ -1478,14 +1500,14 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                 .id(("theme", index))
                                 .flex()
                                 .flex_col()
-                                .gap(px(6.))
+                                .gap(px(8.))
                                 .w(px(112.))
                                 .child(
                                     div()
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .h(px(38.))
+                                        .h(px(40.))
                                         .rounded(px(6.))
                                         .bg(theme.bg_soft)
                                         .border_1()
@@ -1496,7 +1518,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                         })
                                         .text_size(px(13.))
                                         .text_color(theme.fg)
-                                        .child("Aa"),
+                                        .child("❯"),
                                 )
                                 .child(
                                     div()
@@ -1518,7 +1540,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                 }))
                         })),
                 )
-                .child(section_header(theme, "Colors"))
+                .child(settings_group(theme, "Palette"))
                 .child(
                     div().flex().gap(px(10.)).children(
                         [
@@ -1562,7 +1584,6 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                 )
                                 .child(
                                     div()
-                                        .font_family(MONO_FONT)
                                         .text_size(px(9.))
                                         .text_color(theme.fg_dim)
                                         .child(hsla_to_hex(color)),
@@ -1599,7 +1620,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                 .text_size(px(10.5))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.fg_dim)
-                                .child("ANSI COLORS (16)"),
+                                .child("ANSI colors (16)"),
                         ),
                 )
                 .children(app.ansi_open.then(|| ansi_grid(theme, &term_theme.ansi)))
@@ -1625,6 +1646,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
             let (program, program_active) = field_display(app, SettingsField::ShellProgram);
             let (args, args_active) = field_display(app, SettingsField::ShellArgs);
             body = body
+                .child(settings_group(theme, "Shell startup"))
                 .child(setting_row(
                     theme,
                     "Program",
@@ -1660,6 +1682,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
         }
         SettingsSection::Notifications => {
             body = body
+                .child(settings_group(theme, "Command alerts"))
                 .child(setting_row(
                     theme,
                     "Notify on long commands",
@@ -1692,8 +1715,8 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 ))
                 .child(setting_row(
                     theme,
-                    "Notification sound",
-                    "Play the system notification sound",
+                    "Command completion sound",
+                    "Play a sound when a terminal command finishes",
                     toggle_control(
                         "set-notify-sound",
                         theme,
@@ -1704,7 +1727,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 ))
                 .child(note(
                     theme,
-                    "Notifications use the desktop portal and are suppressed while SpritX has focus.",
+                    "The completion sound can be turned off independently.",
                 ));
         }
         SettingsSection::FileTree => {
@@ -1715,16 +1738,16 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 ("Edit file", SettingsField::FileTreeEdit),
                 ("Open file in editor", SettingsField::FileTreeOpenFile),
             ];
-            body = body.child(note(
+            body = body.child(settings_group(theme, "File actions")).child(note(
                 theme,
-                "Commands run on right-click; {path} is replaced with the POSIX-quoted path.",
+                "These commands run from the file context menu. SpritX replaces {path} with the selected path.",
             ));
             for (index, (label, field)) in commands.into_iter().enumerate() {
                 let (value, active) = field_display(app, field);
                 body = body.child(setting_row(
                     theme,
                     label,
-                    "Context-menu command",
+                    "Command to run for this action",
                     editable_input(
                         ("set-ft", index),
                         theme,
@@ -1751,6 +1774,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 .clone()
                 .unwrap_or_else(|| status.url.clone());
             body = body
+                .child(settings_group(theme, "Connection"))
                 .child(setting_row(
                     theme,
                     "Port",
@@ -1782,11 +1806,11 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         },
                     ),
                 ))
-                .child(section_header(
-                    theme,
+                .child(settings_group(theme, "Sharing status"))
+                .child(div().text_size(px(12.)).text_color(theme.fg_dim).child(
                     if status.running {
                         format!(
-                            "Sharing · port {} · {} device(s) connected",
+                            "Sharing on port {} · {} connected",
                             status.port, status.clients
                         )
                     } else {
@@ -1808,7 +1832,6 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                 .bg(theme.bg_soft)
                                 .border_1()
                                 .border_color(theme.border)
-                                .font_family(MONO_FONT)
                                 .text_size(px(10.5))
                                 .text_color(if status.running { theme.accent } else { theme.fg_dim })
                                 .overflow_hidden()
@@ -1828,7 +1851,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                             ),
                         ),
                 )
-                .child(section_header(theme, "Paired devices"))
+                .child(settings_group(theme, "Paired devices"))
                 .child(remote_devices(theme, app, cx))
                 .child(
                     div()
@@ -1866,6 +1889,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
         }
         SettingsSection::History => {
             body = body
+                .child(settings_group(theme, "Recording and privacy"))
                 .child(setting_row(
                     theme,
                     "Record command history",
@@ -1928,7 +1952,8 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 ));
         }
         SettingsSection::Keys => {
-            body = body.child(section_header(theme, "Global"));
+            body = body.child(settings_group(theme, "Custom shortcuts"))
+                .child(note(theme, "Click a key binding to record a new shortcut."));
             for (index, (action, keys)) in SHORTCUTS.iter().enumerate() {
                 let recording = app.recording_action.as_deref() == Some(*action);
                 body = body.child(
@@ -1936,31 +1961,20 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         .flex()
                         .items_center()
                         .justify_between()
-                        .py(px(7.))
+                        .min_h(px(40.))
+                        .gap(px(12.))
                         .border_b_1()
                         .border_color(theme.border)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.))
-                                .child(div().text_size(px(12.5)).child(*action))
-                                .child(
-                                    div()
-                                        .text_size(px(9.5))
-                                        .text_color(theme.fg_dim)
-                                        .child("Click the binding to record a new shortcut"),
-                                ),
-                        )
+                        .child(div().text_size(px(13.)).child(*action))
                         .child(
                             div()
                                 .id(("keybind", index))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .min_w(px(130.))
-                                .h(px(24.))
-                                .px(px(9.))
+                                .min_w(px(132.))
+                                .h(px(28.))
+                                .px(px(8.))
                                 .rounded(px(4.))
                                 .border_1()
                                 .border_color(if recording { theme.accent } else { theme.border })
@@ -1969,7 +1983,6 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                 } else {
                                     theme.bg_soft
                                 })
-                                .font_family(if recording { "system-ui" } else { MONO_FONT })
                                 .text_size(px(11.))
                                 .text_color(if recording { theme.accent } else { theme.fg })
                                 .cursor_pointer()
@@ -2001,7 +2014,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         .items_center()
                         .justify_between()
                         .pt(px(6.))
-                        .child(section_header(theme, "Fixed shortcuts"))
+                        .child(settings_group(theme, "Fixed shortcuts"))
                         .child(
                             text_button("keys-reset", "Reset shortcuts", &theme).on_click(
                                 cx.listener(|this, _, _, cx| {
@@ -2020,6 +2033,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
         }
         SettingsSection::General => {
             body = body
+                .child(settings_group(theme, "Workspace behavior"))
                 .child(setting_row(
                     theme,
                     "Focus pane on hover",
@@ -2044,7 +2058,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         this.settings.persist_blocks = !this.settings.persist_blocks;
                     }),
                 ))
-                .child(section_header(theme, "Configuration"))
+                .child(settings_group(theme, "Configuration"))
                 .child(
                     div()
                         .flex()
@@ -2062,11 +2076,12 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 )
                 .child(note(
                     theme,
-                    "Export / import the whole config. Stored at ~/.config/spritx/config.toml.",
+                    "Export a backup of your preferences or import an existing configuration.",
                 ));
         }
         SettingsSection::About => {
             body = body
+                .child(settings_group(theme, "Application"))
                 .child(
                     div()
                         .flex()
@@ -2103,7 +2118,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                     div()
                                         .text_size(px(11.))
                                         .text_color(theme.fg_dim)
-                                        .child("MIT licensed · no account, no telemetry"),
+                                        .child("MIT license"),
                                 ),
                         ),
                 )
@@ -2111,12 +2126,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                     div()
                         .flex()
                         .gap(px(8.))
-                        .child(text_button("about-logs", "Open logs", &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.reveal_config(cx);
-                            }),
-                        ))
-                        .child(text_button("about-config", "Reveal config", &theme).on_click(
+                        .child(text_button("about-config", "Open config folder", &theme).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.reveal_config(cx);
                             }),
@@ -2125,6 +2135,11 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 .child(note(
                     theme,
                     "Built with Rust, GPUI 0.2.2 and the SpritX shell integration.",
+                ))
+                .child(settings_group(theme, "Third-party licenses"))
+                .child(note(
+                    theme,
+                    include_str!("../../assets/icons/LICENSE-Hugeicons.txt"),
                 ));
         }
     }
@@ -2155,26 +2170,8 @@ fn setting_row(
     description: &'static str,
     control: AnyElement,
 ) -> AnyElement {
-    div()
-        .flex()
+    settings_row_layout(theme, label, description, control)
         .items_center()
-        .justify_between()
-        .gap(px(20.))
-        .py(px(4.))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(div().text_size(px(12.5)).text_color(theme.fg).child(label))
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.fg_dim)
-                        .child(description),
-                ),
-        )
-        .child(control)
         .into_any_element()
 }
 
@@ -2184,34 +2181,61 @@ fn setting_row_top(
     description: &'static str,
     control: AnyElement,
 ) -> AnyElement {
+    settings_row_layout(theme, label, description, control)
+        .items_start()
+        .into_any_element()
+}
+
+fn settings_row_layout(
+    theme: Theme,
+    label: &'static str,
+    description: &'static str,
+    control: AnyElement,
+) -> Div {
     div()
         .flex()
-        .items_start()
+        .flex_wrap()
         .justify_between()
-        .gap(px(20.))
-        .py(px(4.))
+        .gap(px(12.))
+        .min_h(px(48.))
+        .py(px(8.))
+        .border_b_1()
+        .border_color(theme.border)
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(2.))
-                .child(div().text_size(px(12.5)).text_color(theme.fg).child(label))
+                .flex_1()
+                .min_w(px(136.))
+                .gap(px(4.))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.fg).child(label))
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(px(11.))
                         .text_color(theme.fg_dim)
                         .child(description),
                 ),
         )
-        .child(control)
+        .child(div().flex().flex_none().max_w_full().child(control))
+}
+
+fn settings_group(theme: Theme, label: &'static str) -> AnyElement {
+    div()
+        .pt(px(12.))
+        .pb(px(4.))
+        .text_size(px(13.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.fg)
+        .child(label)
         .into_any_element()
 }
 
-fn textual_row(theme: Theme, label: &'static str, value: &'static str) -> AnyElement {
+fn textual_row(theme: Theme, label: &'static str, font_size: f32) -> AnyElement {
+    let palette = crate::terminal::term_theme();
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(8.))
         .child(
             div()
                 .text_size(px(11.))
@@ -2221,15 +2245,15 @@ fn textual_row(theme: Theme, label: &'static str, value: &'static str) -> AnyEle
         .child(
             div()
                 .px(px(12.))
-                .py(px(10.))
-                .rounded(px(6.))
-                .bg(theme.bg_soft)
+                .py(px(12.))
+                .rounded(px(8.))
+                .bg(palette.background)
                 .border_1()
                 .border_color(theme.border)
-                .font_family(MONO_FONT)
-                .text_size(px(13.))
-                .text_color(theme.fg)
-                .child(value),
+                .text_size(px(font_size))
+                .line_height(px(crate::terminal::term_line_height()))
+                .text_color(palette.foreground)
+                .child("❯ echo \"SpritX ready\"\nSpritX ready  0123456789"),
         )
         .into_any_element()
 }
@@ -2312,6 +2336,7 @@ fn font_options(app: &SpritXApp, theme: Theme, cx: &mut Context<SpritXApp>) -> A
             div()
                 .id(("font-opt", index))
                 .flex()
+                .flex_none()
                 .items_center()
                 .justify_between()
                 .gap(px(8.))
@@ -2329,7 +2354,13 @@ fn font_options(app: &SpritXApp, theme: Theme, cx: &mut Context<SpritXApp>) -> A
                 .child(name),
         );
     }
-    list.into_any_element()
+    // Let the list process the wheel first, then stop it before the
+    // surrounding Appearance page gets the same event.
+    div()
+        .id("font-scroll-boundary")
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .child(list)
+        .into_any_element()
 }
 
 /// In-flow option list for the cursor-shape picker.
@@ -2404,7 +2435,6 @@ fn editable_input(
         .bg(theme.bg_soft)
         .border_1()
         .border_color(if active { theme.accent } else { theme.border })
-        .font_family(MONO_FONT)
         .text_size(px(11.5))
         .text_color(theme.fg)
         .cursor_text()
@@ -2437,7 +2467,6 @@ fn editable_number(
         .bg(theme.bg_soft)
         .border_1()
         .border_color(if active { theme.accent } else { theme.border })
-        .font_family(MONO_FONT)
         .text_size(px(11.5))
         .text_color(theme.fg)
         .cursor_text()
@@ -2880,7 +2909,6 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                 .child(
                     div()
                         .text_size(px(9.5))
-                        .font_family(MONO_FONT)
                         .text_color(theme.success)
                         .child("E2E ENCRYPTED"),
                 ),
@@ -2987,7 +3015,6 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                                 .bg(theme.bg_soft)
                                 .border_1()
                                 .border_color(theme.border)
-                                .font_family(MONO_FONT)
                                 .text_size(px(10.))
                                 .text_color(theme.accent)
                                 .overflow_hidden()
@@ -3046,7 +3073,6 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                             .bg(theme.bg_soft)
                             .border_1()
                             .border_color(theme.border)
-                            .font_family(MONO_FONT)
                             .text_size(px(10.))
                             .text_color(theme.accent)
                             .overflow_hidden()

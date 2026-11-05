@@ -1,6 +1,12 @@
 # SpritX Pastel prompt. Source after the user's rc file.
 __spritx_node_dir=''
 __spritx_node_version=''
+PS0=${PS0-}$'\e]133;C\a'
+__spritx_command_finished() {
+    local status=$?
+    printf '\e]133;D;%s\a' "$status"
+    return "$status"
+}
 __spritx_prompt() {
     local status=$? folder user_name clock arrow=166\;227\;161
     user_name=${USER:-$(id -un)}
@@ -35,7 +41,7 @@ __spritx_prompt() {
 }
 # Preserve existing prompt hooks (including shell integration), then style ours.
 if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a'* ]]; then
-    PROMPT_COMMAND+=(__spritx_prompt)
+    PROMPT_COMMAND=(__spritx_command_finished "${PROMPT_COMMAND[@]}" __spritx_prompt)
 else
-    PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__spritx_prompt"
+    PROMPT_COMMAND="__spritx_command_finished; ${PROMPT_COMMAND:+$PROMPT_COMMAND; }__spritx_prompt"
 fi

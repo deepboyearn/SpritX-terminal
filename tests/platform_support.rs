@@ -173,6 +173,46 @@ mod windows {
     }
 
     #[test]
+    fn interactive_powershell_reports_command_start_and_completion() {
+        use spritx_terminal::backend::osc::{OscEvent, OscParser};
+
+        let mut config = SessionConfig::command(
+            platform::default_shell(),
+            [
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NoExit".into(),
+                "-Command".into(),
+                include_str!("../assets/shell/spritx-shell-init.ps1").into(),
+            ],
+        );
+        config.env.push(("SPRITX_COMMAND_TRACKING".into(), "1".into()));
+        let mut session = TerminalSession::spawn(config).unwrap();
+        assert!(session.wait_for_text("❯", Duration::from_secs(15)));
+        session.write_str("Start-Sleep -Milliseconds 750\r").unwrap();
+        let mut parser = OscParser::new();
+        let until = Instant::now() + Duration::from_secs(8);
+        let mut running = false;
+        while Instant::now() < until {
+            if let Some(bytes) = session.pump_bytes() {
+                for timed in parser.feed(&bytes).events {
+                    match timed.event {
+                        OscEvent::OutputStart => running = true,
+                        OscEvent::OutputEnd { exit_code } => {
+                            assert!(running);
+                            assert_eq!(exit_code, 0);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("missing command lifecycle markers (start seen: {running}): {}", session.screen_text());
+    }
+
+    #[test]
     fn interactive_powershell_accepts_commands_after_ctrl_c() {
         let config = SessionConfig::command(
             platform::default_shell(),
@@ -208,11 +248,11 @@ mod windows {
     #[test]
     fn prompt_reuses_trailing_blank_rows_without_overwriting_output() {
         let script = format!(
-            "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n{}\n[Console]::Write(\"KEEP_ONE`r`nKEEP_TWO`r`n`r`n`r`n\"); [Console]::Write((prompt)); Start-Sleep -Milliseconds 300",
+            "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n{}\n[Console]::Write(\"KEEP_ONE`r`nKEEP_TWO`r`n`r`n`r`n\"); [Console]::Write((prompt)); [Console]::Write(([string][char]27 + '[?25l' + ('x' * 640) + \"`r`nWRAPPED_INPUT\")); Start-Sleep -Milliseconds 300",
             include_str!("../assets/shell/spritx-shell-init.ps1"),
         );
         let mut session = powershell(&script);
-        assert!(session.wait_for_text("❯", Duration::from_secs(15)), "{}", session.screen_text());
+        assert!(session.wait_for_text("WRAPPED_INPUT", Duration::from_secs(15)), "{}", session.screen_text());
         let lines = session.visible_lines();
         let last_output = lines.iter().position(|line| line.contains("KEEP_TWO")).unwrap();
         assert!(lines.iter().any(|line| line.contains("KEEP_ONE")));

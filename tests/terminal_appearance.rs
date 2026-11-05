@@ -32,4 +32,21 @@ fn appearance_is_configurable_and_scales_line_height() {
     // Line height keeps the 19 / 13 ratio, so it must grow with the font size.
     assert!(terminal::term_line_height() > 19.0);
     assert!((terminal::term_line_height() - 20.0 * 19.0 / 13.0).abs() < 1.0);
+
+    let pastel = spritx_terminal::theme_presets::PRESETS[0].theme();
+    terminal::set_term_theme(pastel);
+    terminal::set_light_workspace(true);
+    assert!(terminal::term_theme().background.l > 0.9);
+    assert!(terminal::term_theme().foreground.l < 0.2);
+    assert_eq!(terminal::configured_term_theme().background, pastel.background);
+
+    terminal::set_light_workspace(false);
+    assert_eq!(terminal::term_theme().background, pastel.background);
+
+    let mut custom_light = pastel;
+    custom_light.background = gpui::rgb(0xf8fdf9).into();
+    terminal::set_term_theme(custom_light);
+    assert!(terminal::term_theme().background.l < 0.5);
+    terminal::set_light_workspace(true);
+    assert_eq!(terminal::term_theme().background, custom_light.background);
 }

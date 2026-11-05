@@ -1,6 +1,26 @@
 //! Platform defaults shared by persistence, shell sessions and file actions.
 use std::path::PathBuf;
 
+pub fn play_completion_sound() {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBeep(kind: u32) -> i32;
+        }
+        // Use the user's system information chime.
+        unsafe { MessageBeep(0x40) };
+    }
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(|| {
+        let _ = notify_rust::Notification::new()
+            .summary("SpritX Terminal")
+            .body("Terminal command finished")
+            .sound_name("complete")
+            .show();
+    });
+}
+
 pub const DEFAULT_SHELL_LABEL: &str = if cfg!(windows) {
     "Default (PowerShell)"
 } else {

@@ -127,6 +127,7 @@ fn full_loopback_handshake_streams_both_directions() {
             title: "~".into(),
             tab: "shell".into(),
             tab_id: 3,
+            activity: Default::default(),
         }],
         Some(7),
     ));
@@ -313,6 +314,7 @@ fn control_and_client_frames_round_trip() {
                 title: "term".into(),
                 tab: "t".into(),
                 tab_id: 2,
+                activity: Default::default(),
             }],
             None,
         ),

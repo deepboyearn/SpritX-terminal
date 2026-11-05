@@ -2,8 +2,11 @@
 autoload -Uz add-zsh-hook
 __spritx_node_dir=''
 __spritx_node_version=''
+__spritx_command_started() { print -rn -- $'\e]133;C\a'; }
+add-zsh-hook preexec __spritx_command_started
 __spritx_prompt() {
     local result=$? folder=${PWD:t} arrow=166\;227\;161
+    printf '\e]133;D;%s\a' "$result"
     [[ "$PWD" == "$HOME" ]] && folder='~'
     [[ -z "$folder" ]] && folder=/
     if [[ "$__spritx_node_dir" != "$PWD" ]]; then

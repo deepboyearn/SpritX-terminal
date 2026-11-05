@@ -10,7 +10,7 @@ use crate::state::{
     LeafId, LeafState, PaneNode, SplitDirection, TabState, MAX_SPLIT_RATIO, MIN_SPLIT_RATIO,
 };
 use crate::terminal;
-use crate::theme::{MONO_FONT, Theme, term_pad_x, term_pad_y};
+use crate::theme::{Theme, term_pad_x, term_pad_y};
 
 const PROMPT_GAP_PX: f32 = 6.0;
 const PROMPT_INPUT_GAP_PX: f32 = 2.0;
@@ -354,7 +354,6 @@ fn render_leaf(
         return div().into_any_element();
     };
     let active = tab.active_leaf == id;
-    let multi = tab.pane_count() > 1;
     let tab_index = app.active_tab;
 
     let mut pane = div()
@@ -368,8 +367,6 @@ fn render_leaf(
         .overflow_hidden()
         .rounded(px(5.))
         .bg(theme.bg)
-        .border_1()
-        .border_color(if active { theme.accent } else { theme.border })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -589,15 +586,6 @@ fn render_leaf(
             }
         }));
 
-    if active {
-        pane = pane.shadow(vec![gpui::BoxShadow {
-            color: theme.accent.opacity(0.12).into(),
-            blur_radius: px(3.),
-            spread_radius: px(3.),
-            offset: gpui::point(px(0.), px(0.)),
-        }]);
-    }
-
     pane = pane.child(render_live_terminal(
         app,
         leaf,
@@ -606,43 +594,12 @@ fn render_leaf(
         id,
     ));
 
-    if multi {
-        pane = pane.child(render_grip(theme, active));
-    }
-
-    pane.into_any_element()
-}
-
-/// 18×18 six-dot grip (`.pane-grip`). Pane drag/swapping is still a TODO in
-/// the GPUI port; the grip is rendered with the correct reveal + hover states.
-fn render_grip(theme: Theme, active: bool) -> AnyElement {
-    let column = |count: usize| {
-        let mut col = div().flex().flex_col().gap(px(2.));
-        for _ in 0..count {
-            col = col.child(dot(theme.fg_dim, 2.0));
-        }
-        col
-    };
-    div()
-        .id("pane-grip")
-        .absolute()
-        .top(px(4.))
-        .right(px(4.))
-        .size(px(18.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(2.))
-        .rounded(px(4.))
-        .bg(theme.bg_soft)
-        .border_1()
-        .border_color(if active { theme.accent } else { theme.border })
-        .opacity(if active { 0.85 } else { 0.35 })
-        .cursor(CursorStyle::OpenHand)
-        .hover(|s| s.opacity(1.0).border_color(theme.accent).cursor_grab())
-        .child(column(3))
-        .child(column(3))
-        .into_any_element()
+    pane.child(
+        dot(if active { theme.success } else { theme.fg_dim }, 5.0)
+            .absolute()
+            .top(px(2.))
+            .right(px(8.)),
+    ).into_any_element()
 }
 
 fn render_live_terminal(
@@ -659,7 +616,6 @@ fn render_live_terminal(
             .flex_1()
             .p(px(16.))
             .gap(px(8.))
-            .font_family(MONO_FONT)
             .text_size(px(12.))
             .child(
                 div()
@@ -871,7 +827,7 @@ fn render_live_terminal(
                 if remote_driven {
                     return;
                 }
-                let width = f32::from(bounds.size.width) - 2.0 * f32::from(term_pad_x()) - 2.0;
+                let width = f32::from(bounds.size.width) - 2.0 * f32::from(term_pad_x());
                 // Leave room for the prompt spacer without clipping the last
                 // terminal row when the shell reaches the pane bottom.
                 let height = f32::from(bounds.size.height) - 2.0 * f32::from(term_pad_y()) - PROMPT_GAP_PX - PROMPT_INPUT_GAP_PX;
@@ -908,6 +864,7 @@ fn render_live_terminal(
 pub fn render_context_menu(
     app: &SpritXApp,
     menu: &PaneMenuState,
+    viewport: gpui::Size<Pixels>,
     cx: &mut Context<SpritXApp>,
 ) -> AnyElement {
     let theme = app.theme;
@@ -928,17 +885,18 @@ pub fn render_context_menu(
     div()
         .id("pane-context-menu")
         .absolute()
-        .left(px(menu.x.min(880.0)))
-        .top(px(menu.y))
+        .left(px(menu.x).clamp(px(0.), (viewport.width - px(220.)).max(px(0.))))
+        .top(px(menu.y).clamp(px(0.), (viewport.height - px(256.)).max(px(0.))))
         .w(px(220.))
         .flex()
         .flex_col()
-        .p(px(4.))
-        .rounded(px(6.))
+        .p(px(6.))
+        .rounded(px(12.))
         .bg(theme.bg)
         .border_1()
         .border_color(theme.border)
         .shadow_lg()
+        .occlude()
         .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| {
             cx.stop_propagation();
         }))
@@ -952,7 +910,10 @@ pub fn render_context_menu(
             false,
             theme,
             cx,
-            move |this, cx| this.show_toast("Nothing is selected", cx),
+            move |this, cx| {
+                this.focus_leaf(leaf, cx);
+                this.copy_selection(cx);
+            },
         ))
         .child(menu_row(
             "pane-ctx-paste",
@@ -961,7 +922,10 @@ pub fn render_context_menu(
             false,
             theme,
             cx,
-            move |this, cx| this.show_toast("Clipboard is empty", cx),
+            move |this, cx| {
+                this.focus_leaf(leaf, cx);
+                this.paste_clipboard(cx);
+            },
         ))
         .child(div().h(px(1.)).my(px(4.)).bg(theme.border))
         .child(menu_row(
@@ -994,7 +958,6 @@ pub fn render_context_menu(
             theme,
             cx,
             move |this, cx| {
-                this.pane_menu = None;
                 // Share *this* pane, not whatever the desktop is focused on:
                 // `refresh_remote_tabs` publishes the active leaf, so focusing
                 // here is what actually points remote clients at it.
@@ -1048,8 +1011,8 @@ fn menu_row(
         .items_center()
         .gap(px(8.))
         .px(px(10.))
-        .py(px(6.))
-        .rounded(px(4.))
+        .h(px(32.))
+        .rounded(px(8.))
         .cursor_pointer()
         .text_size(px(12.5))
         .text_color(color)
@@ -1060,7 +1023,12 @@ fn menu_row(
                 s.bg(theme.white_06)
             }
         })
-        .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.pane_menu = None;
+            action(this, cx);
+            cx.notify();
+        }))
         .child(icon(ic, 14.0, icon_color))
         .child(label)
         .into_any_element()

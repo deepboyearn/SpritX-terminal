@@ -328,6 +328,14 @@ fn sanitize_name(raw: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// A terminal/pane exposed to remote clients.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandActivity {
+    pub running: bool,
+    pub completed: u64,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TabInfo {
@@ -339,6 +347,8 @@ pub struct TabInfo {
     /// Stable tab id (two tabs may share a title).
     #[serde(default)]
     pub tab_id: u64,
+    #[serde(default)]
+    pub activity: CommandActivity,
 }
 
 /// Plaintext handshake / in-channel JSON control frames.

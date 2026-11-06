@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::{
-    AnyElement, Context, DragMoveEvent, FontWeight, IntoElement, MouseButton, Render, Window, div,
-    prelude::*, px, uniform_list,
+    AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, IntoElement, MouseButton, Pixels, Render, Window, div,
+    canvas, prelude::*, px, uniform_list,
 };
 
 use crate::backend::files::{FsEntry, expand_tilde, home_dir, list_dir};
@@ -352,12 +352,41 @@ struct FileResize {
     anchor_x: Cell<f32>,
 }
 
-struct ResizeGhost;
+#[derive(Default)]
+struct FileScrollDrag {
+    anchor: Cell<(Pixels, Pixels)>,
+}
 
-impl Render for ResizeGhost {
+struct FileTreeDragGhost;
+
+impl Render for FileTreeDragGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().size(px(0.))
     }
+}
+
+fn file_scroll_thumb_height(height: Pixels, max: Pixels) -> Pixels {
+    (height * (height / (height + max))).max(px(16.)).min(height)
+}
+
+fn show_file_scroll_thumb(app: &mut SpritXApp, cx: &mut Context<SpritXApp>) {
+    app.file_scroll_thumb_visible = true;
+    app.file_scroll_hide_task = Some(cx.spawn(async move |this, cx| {
+        gpui::Timer::after(std::time::Duration::from_secs(3)).await;
+        let mut waited_for_drag = false;
+        while this.update(cx, |_, cx| cx.has_active_drag()).unwrap_or(false) {
+            waited_for_drag = true;
+            gpui::Timer::after(std::time::Duration::from_millis(100)).await;
+        }
+        if waited_for_drag {
+            gpui::Timer::after(std::time::Duration::from_secs(3)).await;
+        }
+        let _ = this.update(cx, |this, cx| {
+            this.file_scroll_thumb_visible = false;
+            cx.notify();
+        });
+    }));
+    cx.notify();
 }
 
 pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
@@ -399,10 +428,6 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .min_w(px(180.))
         .min_h_0()
         .h_full()
-        .rounded(px(12.))
-        .bg(theme.sidebar)
-        .border_1()
-        .border_color(theme.border)
         .overflow_hidden()
         .on_drag_move::<FileResize>(cx.listener(
             |this, event: &DragMoveEvent<FileResize>, _, cx| {
@@ -547,6 +572,8 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                         ft_button("ft-toggle-file-list", theme)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.file_list_collapsed = !this.file_list_collapsed;
+                                this.file_scroll_thumb_visible = false;
+                                this.file_scroll_hide_task = None;
                                 cx.notify();
                             }))
                             .child(icon(
@@ -574,6 +601,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .flex_col()
         .flex_1()
         .min_h_0()
+        .relative()
         .py(px(4.))
         .text_size(px(12.5));
 
@@ -589,7 +617,16 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         body = body.child(ft_note(theme, 0, "Empty folder"));
     } else {
         let ctx_path = ui.ctx.as_ref().map(|(path, _)| path.clone());
-        body = body.child(
+        let scroll = app.file_list_scroll.clone();
+        body = body.on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+            let max = this.file_list_scroll.0.borrow().base_handle.max_offset().height;
+            if max <= px(0.)
+                || event.delta.pixel_delta(window.line_height()).y == px(0.)
+            {
+                return;
+            }
+            show_file_scroll_thumb(this, cx);
+        })).child(
             uniform_list(
                 "file-tree-list",
                 rows.len(),
@@ -603,9 +640,74 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                     items
                 }),
             )
+            .track_scroll(scroll.clone())
             .flex_1()
             .min_h_0(),
         );
+        if app.file_scroll_thumb_visible {
+            let drag_scroll = scroll.clone();
+            body = body.child(
+                div()
+                .id("file-tree-scrollbar")
+                .absolute()
+                .top(px(4.))
+                .bottom(px(4.))
+                // Leave the outer 6px available for sidebar resizing.
+                .right(px(6.))
+                .w(px(10.))
+                .cursor(CursorStyle::PointingHand)
+                .block_mouse_except_scroll()
+                .on_drag(FileScrollDrag::default(), move |drag, _, window, cx| {
+                    let offset = drag_scroll.0.borrow().base_handle.offset().y;
+                    drag.anchor.set((window.mouse_position().y, offset));
+                    cx.new(|_| FileTreeDragGhost)
+                })
+                .on_drag_move::<FileScrollDrag>(cx.listener(
+                    |this, event: &DragMoveEvent<FileScrollDrag>, _, cx| {
+                        let (anchor_y, start_offset) = event.drag(cx).anchor.get();
+                        let state = this.file_list_scroll.0.borrow();
+                        let handle = &state.base_handle;
+                        let max = handle.max_offset().height;
+                        let height = handle.bounds().size.height;
+                        let travel = height - file_scroll_thumb_height(height, max);
+                        if max <= px(0.) || travel <= px(0.) {
+                            return;
+                        }
+                        let delta = (event.event.position.y - anchor_y) / travel;
+                        let offset = (start_offset - max * delta).clamp(-max, px(0.));
+                        handle.set_offset(gpui::point(handle.offset().x, offset));
+                        drop(state);
+                        show_file_scroll_thumb(this, cx);
+                    },
+                ))
+                .child(canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        let state = scroll.0.borrow();
+                        let handle = &state.base_handle;
+                        let max = handle.max_offset().height;
+                        let height = bounds.size.height;
+                        if max <= px(0.) || height <= px(0.) {
+                            return;
+                        }
+                        let thumb_height = file_scroll_thumb_height(height, max);
+                        let progress = (-handle.offset().y / max).clamp(0.0, 1.0);
+                        let thumb = gpui::Bounds {
+                            origin: gpui::point(bounds.left() + px(4.), bounds.top() + (height - thumb_height) * progress),
+                            size: gpui::size(px(2.), thumb_height),
+                        };
+                        window.paint_quad(gpui::quad(
+                            thumb,
+                            gpui::Corners::all(px(1.)),
+                            theme.fg_dim.opacity(0.45),
+                            gpui::Edges::all(px(0.)),
+                            gpui::transparent_black(),
+                            gpui::BorderStyle::Solid,
+                        ));
+                    },
+                ).size_full()),
+            );
+        }
     }
 
     panel = panel.child(body);
@@ -631,17 +733,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
             .top(px(0.))
             .bottom(px(0.))
             .w(px(6.))
-            .flex()
-            .items_center()
-            .justify_center()
             .cursor_col_resize()
-            .child(
-                div()
-                    .w(px(2.))
-                    .h(px(28.))
-                    .rounded(px(1.))
-                    .bg(theme.fg_dim.opacity(0.45)),
-            )
             .on_click(cx.listener(|this, event: &gpui::ClickEvent, _: &mut gpui::Window, cx| {
                 if event.click_count() >= 2 {
                     this.file_tree_width = 240.0;
@@ -655,7 +747,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                 },
                 |drag, _, window, cx| {
                     drag.anchor_x.set(f32::from(window.mouse_position().x));
-                    cx.new(|_| ResizeGhost)
+                    cx.new(|_| FileTreeDragGhost)
                 },
             ),
     );

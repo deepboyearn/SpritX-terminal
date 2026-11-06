@@ -1,6 +1,9 @@
 //! Platform defaults shared by persistence, shell sessions and file actions.
 use std::path::PathBuf;
 
+mod powershell;
+pub use powershell::POWERSHELL_INIT;
+
 pub fn play_completion_sound() {
     #[cfg(windows)]
     {

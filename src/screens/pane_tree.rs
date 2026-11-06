@@ -14,6 +14,39 @@ use crate::theme::{Theme, term_pad_x, term_pad_y};
 
 const PROMPT_GAP_PX: f32 = 6.0;
 const PROMPT_INPUT_GAP_PX: f32 = 2.0;
+const PANE_STATUS_DOT_PX: f32 = 5.0;
+
+fn terminal_right_padding() -> Pixels {
+    term_pad_x() + px(8.)
+}
+
+fn paint_prompt_cap(
+    window: &mut Window,
+    bounds: gpui::Bounds<Pixels>,
+    color: gpui::Hsla,
+    background: gpui::Hsla,
+    opening: bool,
+) {
+    let left = bounds.origin.x;
+    let right = left + bounds.size.width;
+    let top = bounds.origin.y;
+    let bottom = top + bounds.size.height;
+    let (join, tip) = if opening { (right, left) } else { (left, right) };
+    let half_height = bounds.size.height / 2.;
+    let mid = top + half_height;
+    // Approximate a half ellipse that fills the shaped cap cell from top to bottom.
+    let bend_x = join + (tip - join) * 0.552_284_8;
+    let bend_y = half_height * 0.552_284_8;
+    let mut path = gpui::PathBuilder::fill();
+    path.move_to(gpui::point(join, top));
+    path.cubic_bezier_to(gpui::point(tip, mid), gpui::point(bend_x, top), gpui::point(tip, mid - bend_y));
+    path.cubic_bezier_to(gpui::point(join, bottom), gpui::point(tip, mid + bend_y), gpui::point(bend_x, bottom));
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_quad(gpui::fill(bounds, background));
+        window.paint_path(path, color);
+    }
+}
 
 type GridSection = (String, Vec<TextRun>);
 
@@ -331,9 +364,9 @@ fn divider(theme: Theme, is_row: bool, path: &[usize], tab_id: u64) -> AnyElemen
             |_, _, _, cx| cx.new(|_| DragGhost),
         );
     let line = if is_row {
-        div().w(px(2.)).h_full().bg(theme.border)
+        div().w(px(1.)).h_full().rounded(px(1.)).bg(theme.border)
     } else {
-        div().w_full().h(px(2.)).bg(theme.border)
+        div().w_full().h(px(1.)).rounded(px(1.)).bg(theme.border)
     };
     base = if is_row {
         base.w(px(8.)).h_full()
@@ -365,8 +398,8 @@ fn render_leaf(
         .min_h_0()
         .relative()
         .overflow_hidden()
-        .rounded(px(5.))
-        .bg(theme.bg)
+        .rounded(px(10.))
+        .bg(terminal::term_theme().background)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -594,12 +627,17 @@ fn render_leaf(
         id,
     ));
 
-    pane.child(
-        dot(if active { theme.success } else { theme.fg_dim }, 5.0)
-            .absolute()
-            .top(px(2.))
-            .right(px(8.)),
-    ).into_any_element()
+    let line_height = terminal::term_line_height();
+    let center_offset = px((line_height - PANE_STATUS_DOT_PX) / 2.0);
+    let status = dot(if active { theme.success } else { theme.fg_dim }, PANE_STATUS_DOT_PX)
+        .absolute();
+    let status = match app.session(id).and_then(|session| session.powerline_prompt_end().map(|end| (session, end))) {
+        Some((session, (row, column))) => status
+            .left(term_pad_x() + px(f32::from(column) * terminal::cell_width() + 8.))
+            .top(term_pad_y() + px(visual_row_top(row, line_height, session.powerline_prompt_row())) + center_offset),
+        None => status.top(term_pad_y() + center_offset).right(term_pad_x()),
+    };
+    pane.child(status).into_any_element()
 }
 
 fn render_live_terminal(
@@ -647,6 +685,23 @@ fn render_live_terminal(
     let term_theme = terminal::term_theme();
     let alternate = screen.alternate_screen();
     let prompt_row = session.powerline_prompt_row();
+    let prompt_caps = session.powerline_prompt_end().and_then(|(row, _)| {
+        let header = session.render_row(row, term_theme.foreground, term_theme.background);
+        let first = header.spans.first()?;
+        let last = header.spans.last()?;
+        if first.text != "" || last.text != "" || first.colors.bg.is_some() || last.colors.bg.is_some() {
+            return None;
+        }
+        let mut text = String::new();
+        let mut runs = Vec::new();
+        for span in &header.spans {
+            terminal::append_span_runs(span, &mut runs);
+            text.push_str(&span.text);
+        }
+        let top = px(visual_row_top(row, line_h, prompt_row));
+        Some((top, text, runs, first.colors.fg, last.colors.fg))
+    });
+    let font_size = px(appearance.font_size);
 
     crate::metrics::add(crate::metrics::Name::Panes, 1);
     // Keep the grid in up to three shaped text elements. The current
@@ -688,12 +743,29 @@ fn render_live_terminal(
                 ));
             }
         },
-        |_: gpui::Bounds<Pixels>, _: (), _window: &mut Window, _cx: &mut gpui::App| {},
+        move |bounds: gpui::Bounds<Pixels>, _: (), window: &mut Window, _cx: &mut gpui::App| {
+            if let Some((top, text, runs, opening, closing)) = prompt_caps {
+                let layout = window.text_system().layout_line(&text, font_size, &runs, None);
+                let start_width = layout.x_for_index(''.len_utf8());
+                let end_x = layout.x_for_index(text.len() - ''.len_utf8());
+                let origin = bounds.origin + gpui::point(px(0.), top);
+                for (x, width, color, opening) in [
+                    (px(0.), start_width, opening, true),
+                    (end_x, layout.width - end_x, closing, false),
+                ] {
+                    let cap_bounds = gpui::Bounds::new(
+                        origin + gpui::point(x, px(0.)),
+                        gpui::size(width, px(line_h)),
+                    );
+                    paint_prompt_cap(window, cap_bounds, color, term_theme.background, opening);
+                }
+            }
+        },
     )
     .absolute()
     .top(term_pad_y())
     .left(term_pad_x())
-    .right(term_pad_x())
+    .right(terminal_right_padding())
     .bottom(term_pad_y());
 
     // Translucent overlay also highlights cells with explicit ANSI backgrounds.
@@ -735,16 +807,16 @@ fn render_live_terminal(
         .relative()
         .cursor(CursorStyle::IBeam)
         .overflow_hidden()
-        .px(term_pad_x())
+        .pl(term_pad_x())
+        .pr(terminal_right_padding())
         .py(term_pad_y())
         .font_family(appearance.font_family.clone())
         .text_size(px(appearance.font_size))
         .line_height(px(line_h))
-        .bg(term_theme.background)
         .text_color(term_theme.foreground)
         .child(grid)
-        .children(selection_rects)
-        .child(origin_canvas);
+        .child(origin_canvas)
+        .children(selection_rects);
 
     // Only the active pane blinks; inactive panes retain a stable caret.
     let active = app.active_tab().active_leaf == leaf_id && app.modal.is_none();
@@ -778,7 +850,7 @@ fn render_live_terminal(
         body = body.child(
             div()
                 .absolute()
-                .right(px(8.))
+                .right(terminal_right_padding())
                 .top(px(4.))
                 .px(px(6.))
                 .py(px(2.))
@@ -827,7 +899,7 @@ fn render_live_terminal(
                 if remote_driven {
                     return;
                 }
-                let width = f32::from(bounds.size.width) - 2.0 * f32::from(term_pad_x());
+                let width = f32::from(bounds.size.width - term_pad_x() - terminal_right_padding());
                 // Leave room for the prompt spacer without clipping the last
                 // terminal row when the shell reaches the pane bottom.
                 let height = f32::from(bounds.size.height) - 2.0 * f32::from(term_pad_y()) - PROMPT_GAP_PX - PROMPT_INPUT_GAP_PX;

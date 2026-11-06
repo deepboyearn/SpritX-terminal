@@ -104,11 +104,8 @@ fn render_lead(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
 
 fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
-    let selected_fill = if theme.bg.l >= 0.5 {
-        theme.bg
-    } else {
-        gpui::rgb(0x3a3a3d).into()
-    };
+    let light = theme.bg.l >= 0.5;
+    let selected_fill = gpui::rgb(if light { 0xffffff } else { 0x3a3a3d });
     let offset = app.tab_scroll.offset().x;
     let max_offset = app.tab_scroll.max_offset().width;
     let can_scroll_left = offset > px(1.0);
@@ -119,7 +116,7 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .flex()
         .min_w_0()
         .items_center()
-        .gap(px(2.))
+        .gap(px(10.))
         .p(px(3.))
         .overflow_x_scroll()
         .scrollbar_width(px(0.))
@@ -270,11 +267,14 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         if panes > 1 && !editing {
             tab_el = tab_el.child(
                 div()
+                    .flex()
                     .flex_none()
-                    .ml(px(4.))
+                    .items_center()
+                    .gap(px(3.))
                     .text_size(px(10.))
                     .text_color(theme.fg_dim)
-                    .child(format!("⊞ {panes}")),
+                    .child(icon(Icon::Layouts, 11.0, theme.fg_dim))
+                    .child(panes.to_string()),
             );
         }
 
@@ -314,12 +314,30 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     let highlight = app.tab_highlight.clone();
     let selected_index = app.active_tab;
     let selected_id = app.active_tab().id;
+    let tab_count = app.tabs.len();
     if highlight.borrow().as_ref().is_none_or(|pill| pill.tab_id != selected_id) {
         scroll.scroll_to_item(selected_index);
     }
     let sliding_pill = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
+            let offset = scroll.offset();
+            // Give each tab its own grey shell around the sliding selection.
+            for index in 0..tab_count {
+                if let Some(mut shell) = scroll.bounds_for_item(index) {
+                    shell.origin += offset - gpui::point(px(3.), px(3.));
+                    shell.size.width += px(6.);
+                    shell.size.height += px(6.);
+                    window.paint_quad(gpui::quad(
+                        shell,
+                        gpui::Corners::all(px(16.)),
+                        theme.bg_soft,
+                        gpui::Edges::all(px(0.)),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::Solid,
+                    ));
+                }
+            }
             let Some(mut target) = scroll.bounds_for_item(selected_index) else {
                 return;
             };
@@ -339,7 +357,7 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
             }
             pill.target = target;
             let mut position = pill.position(now);
-            position.origin += bounds.origin + scroll.offset();
+            position.origin += bounds.origin + offset;
             window.paint_quad(gpui::quad(
                 position,
                 gpui::Corners::all(px(13.)),
@@ -358,8 +376,6 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .flex()
         .min_w_0()
         .relative()
-        .rounded(px(16.))
-        .bg(theme.bg_soft)
         .overflow_hidden()
         .child(sliding_pill)
         .child(strip);

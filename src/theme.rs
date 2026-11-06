@@ -4,7 +4,6 @@ use gpui::{Hsla, Pixels, rgb, rgba, px};
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub outer: Hsla,
-    pub sidebar: Hsla,
     pub bg: Hsla,
     pub bg_soft: Hsla,
     pub border: Hsla,
@@ -28,7 +27,6 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             outer: rgb(0x0a0a0c).into(),
-            sidebar: rgb(0x0f0f10).into(),
             bg: rgb(0x141415).into(),
             bg_soft: rgb(0x232325).into(),
             border: rgba(0xffffff14).into(),
@@ -51,9 +49,8 @@ impl Theme {
 
     pub fn light() -> Self {
         Self {
-            outer: rgb(0xf0f3f0).into(),
-            sidebar: rgb(0xf8fdf9).into(),
-            bg: rgb(0xffffff).into(),
+            outer: rgb(0xf0f2f4).into(),
+            bg: rgb(0xfefefe).into(),
             bg_soft: rgb(0xf1f5f2).into(),
             border: rgb(0xe5eae6).into(),
             fg: rgb(0x18181b).into(),

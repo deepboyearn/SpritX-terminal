@@ -72,6 +72,9 @@ pub struct SpritXApp {
     pub file_tree_visible: bool,
     pub file_tree_width: f32,
     pub file_list_collapsed: bool,
+    pub(super) file_list_scroll: gpui::UniformListScrollHandle,
+    pub(super) file_scroll_thumb_visible: bool,
+    pub(super) file_scroll_hide_task: Option<gpui::Task<()>>,
     pub modal: Option<Modal>,
     pub layouts_open: bool,
     pub remote_menu_open: bool,
@@ -139,21 +142,13 @@ impl SpritXApp {
         available_fonts.retain(|name| !name.trim().is_empty() && !name.starts_with('.'));
         available_fonts.sort();
         available_fonts.dedup();
-        let mut app_config = AppConfig::load();
+        let app_config = AppConfig::load();
         crate::terminal::set_light_workspace(app_config.appearance.light_workspace);
         let theme = if app_config.appearance.light_workspace {
             Theme::light()
         } else {
             Theme::dark()
         };
-        // Upgrade the former stock theme; custom themes remain available.
-        if theme_index_for(&app_config.appearance.theme) == 1 {
-            write_theme(&mut app_config, &crate::theme_presets::PRESETS[0].theme());
-            if app_config.appearance.font_family.starts_with("\"JetBrainsMono Nerd Font\"") {
-                app_config.appearance.font_family = crate::backend::config::AppearanceConfig::default().font_family;
-            }
-            let _ = app_config.save();
-        }
         let settings = settings_from_config(&app_config);
         let history = HistoryStore::open_default().map(|store| {
             store.with_ignore(
@@ -178,7 +173,10 @@ impl SpritXApp {
             cursor_blink_epoch: std::time::Instant::now(),
             file_tree_visible: true,
             file_tree_width: 230.0,
-            file_list_collapsed: false,
+            file_list_collapsed: true,
+            file_list_scroll: Default::default(),
+            file_scroll_thumb_visible: false,
+            file_scroll_hide_task: None,
             modal: match std::env::var("SPRITX_OPEN").as_deref() {
                 Ok("settings") => Some(Modal::Settings),
                 Ok("palette") => Some(Modal::Palette(PaletteMode::Command)),
@@ -478,6 +476,7 @@ impl SpritXApp {
         crate::metrics::event("action.save_settings");
         let mut config = AppConfig::load();
         apply_settings(&mut config, &self.settings);
+        config.appearance.light_workspace = self.theme.bg.l >= 0.5;
         write_theme(&mut config, &crate::terminal::configured_term_theme());
         let _ = config.save();
         crate::terminal::set_appearance(terminal_appearance_from_config(&config, &self.settings_fonts));
@@ -498,7 +497,7 @@ impl SpritXApp {
         let Some(preset) = crate::theme_presets::PRESETS.get(index) else {
             return;
         };
-        crate::terminal::set_term_theme(preset.theme());
+        self.apply_palette_and_mode(preset.theme());
         self.settings.theme = preset.name;
         self.selected_theme = index;
         self.save_settings();
@@ -507,7 +506,7 @@ impl SpritXApp {
 
     /// Replace one of the five primary terminal colors (color picker).
     pub fn set_theme_color(&mut self, key: ThemeColorKey, value: u32, cx: &mut Context<Self>) {
-        let mut theme = crate::terminal::configured_term_theme();
+        let mut theme = crate::terminal::term_theme();
         let color: gpui::Hsla = gpui::rgb(value).into();
         match key {
             ThemeColorKey::Background => theme.background = color,
@@ -516,11 +515,18 @@ impl SpritXApp {
             ThemeColorKey::Cursor => theme.cursor = color,
             ThemeColorKey::Selection => theme.selection = color,
         }
-        crate::terminal::set_term_theme(theme);
+        self.apply_palette_and_mode(theme);
         self.selected_theme = usize::MAX;
         self.settings.theme = "Custom";
         self.save_settings();
         cx.notify();
+    }
+
+    fn apply_palette_and_mode(&mut self, palette: crate::terminal::TerminalTheme) {
+        let light = palette.background.l >= 0.5;
+        crate::terminal::set_light_workspace(light);
+        crate::terminal::set_term_theme(palette);
+        self.theme = if light { Theme::light() } else { Theme::dark() };
     }
 
     /// Commit the inline field being edited (Enter / blur). Clamps numerics.
@@ -1433,7 +1439,11 @@ impl SpritXApp {
                     .min_h_0()
                     .rounded(px(12.))
                     .border_1()
-                    .border_color(self.theme.border)
+                    .border_color(if self.theme.bg.l >= 0.5 {
+                        self.theme.outer
+                    } else {
+                        self.theme.border
+                    })
                     .bg(self.theme.bg)
                     .overflow_hidden()
                     .child(crate::metrics::tab_bar(|| super::tab_bar::render(self, cx)))
@@ -1720,7 +1730,7 @@ impl Render for SpritXApp {
                     return;
                 }
                 if this.modal.is_none() && cmd && key == "0" {
-                    this.settings.font_size = 11.0;
+                    this.settings.font_size = f32::from(crate::backend::config::DEFAULT_TERMINAL_FONT_SIZE);
                     this.save_settings();
                     cx.notify();
                     cx.stop_propagation();

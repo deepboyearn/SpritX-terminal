@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
+
 /// Top-level application configuration, stored in `$XDG_CONFIG_HOME/spritx/config.toml`
 /// (or `~/.config/spritx/config.toml`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -70,7 +72,7 @@ impl Default for AppearanceConfig {
             font_family:
                 r#""JetBrainsMonoNL Nerd Font Mono", "JetBrainsMonoNL NFM", "JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace"#
                     .to_string(),
-            font_size: 11,
+            font_size: DEFAULT_TERMINAL_FONT_SIZE,
             font_size_version: 2,
             cursor_blink: true,
             cursor_style: "block".to_string(),
@@ -94,7 +96,7 @@ impl AppearanceConfig {
         if (self.font_size_version == 0 && matches!(self.font_size, 8 | 12 | 14))
             || (self.font_size_version == 1 && self.font_size == 8)
         {
-            self.font_size = 11;
+            self.font_size = DEFAULT_TERMINAL_FONT_SIZE;
         }
         self.font_size_version = 2;
         true
@@ -441,7 +443,7 @@ mod tests {
     #[test]
     fn defaults_match_original() {
         let c = AppConfig::default();
-        assert_eq!(c.appearance.font_size, 11);
+        assert_eq!(c.appearance.font_size, DEFAULT_TERMINAL_FONT_SIZE);
         assert_eq!(c.appearance.font_size_version, 2);
         assert_eq!(c.appearance.scrollback, 5000);
         assert_eq!(c.appearance.theme.background, "#1e1e2e");
@@ -466,7 +468,7 @@ mod tests {
             let mut config: AppConfig = toml::from_str(&body).unwrap();
             assert_eq!(config.appearance.font_size_version, 0);
             assert!(config.appearance.migrate_font_size());
-            assert_eq!(config.appearance.font_size, 11);
+            assert_eq!(config.appearance.font_size, DEFAULT_TERMINAL_FONT_SIZE);
             assert!(!config.appearance.migrate_font_size());
 
             // A later user choice of 14px must survive a save and reload.
@@ -486,7 +488,7 @@ mod tests {
         )
         .unwrap();
         assert!(previous.appearance.migrate_font_size());
-        assert_eq!(previous.appearance.font_size, 11);
+        assert_eq!(previous.appearance.font_size, DEFAULT_TERMINAL_FONT_SIZE);
     }
 
     #[test]
@@ -540,7 +542,7 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "this is not = valid toml [[[").unwrap();
         let loaded = load_from(&path);
-        assert_eq!(loaded.appearance.font_size, 11);
+        assert_eq!(loaded.appearance.font_size, DEFAULT_TERMINAL_FONT_SIZE);
         assert!(!path.exists());
         assert!(dir.join("config.toml.broken").exists());
         let _ = std::fs::remove_dir_all(&dir);

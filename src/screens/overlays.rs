@@ -90,6 +90,7 @@ fn side_layer(
     id: &'static str,
     theme: Theme,
     width: f32,
+    inset: f32,
     panel: AnyElement,
     cx: &mut Context<SpritXApp>,
 ) -> AnyElement {
@@ -108,17 +109,19 @@ fn side_layer(
             div()
                 .id(SharedString::from(format!("{id}-panel")))
                 .absolute()
-                .top(px(0.))
-                .right(px(0.))
-                .bottom(px(0.))
+                .top(px(inset))
+                .right(px(inset))
+                .bottom(px(inset))
                 .w(px(width))
                 .max_w(relative(0.97))
                 .flex()
                 .flex_col()
-                .bg(theme.bg)
-                .border_l_1()
-                .border_color(theme.border)
-                .shadow_lg()
+                .when(inset == 0., |d| {
+                    d.bg(theme.bg)
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .shadow_lg()
+                })
                 .occlude()
                 .child(panel),
         );
@@ -286,33 +289,35 @@ fn empty_state(theme: Theme, text: &'static str) -> AnyElement {
 
 pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
+    let current = current_layout(&app.active_tab().tree);
     let mut presets = div().flex().flex_wrap().gap(px(8.));
     for (index, preset) in LAYOUT_PRESETS.iter().enumerate() {
         let id = preset.id;
         let label = preset.label;
+        let selected = current == Some(id);
         presets = presets.child(
             div()
                 .id(("layout", index))
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(px(5.))
+                .gap(px(8.))
                 .w(px(104.))
                 .p(px(8.))
-                .rounded(px(6.))
-                .border_1()
-                .border_color(theme.border)
+                .rounded(px(8.))
+                .bg(if selected { theme.bg_soft } else { theme.bg })
                 .cursor_pointer()
-                .hover(|s| s.border_color(theme.accent).bg(theme.accent.opacity(0.06)))
+                .hover(|s| s.bg(theme.white_06))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(p) = LAYOUT_PRESETS.iter().find(|p| p.id == id) {
                         this.apply_layout(p, cx);
                     }
                 }))
-                .child(layout_preview(theme, preset.hint))
+                .child(layout_preview(theme, preset.hint, selected))
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(px(11.))
+                        .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
                         .text_color(theme.fg)
                         .child(label),
                 ),
@@ -322,8 +327,8 @@ pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> Any
     let body = div()
         .flex()
         .flex_col()
-        .gap(px(10.))
-        .p(px(12.))
+        .gap(px(12.))
+        .p(px(16.))
         .child(
             div()
                 .flex()
@@ -331,10 +336,10 @@ pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> Any
                 .justify_between()
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(14.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.fg_dim)
-                        .child("LAYOUT PRESETS"),
+                        .text_color(theme.fg)
+                        .child("Pane layouts"),
                 )
                 .child(esc_chip(theme)),
         )
@@ -344,17 +349,20 @@ pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> Any
                 .flex()
                 .items_center()
                 .justify_between()
+                .border_t_1()
+                .border_color(theme.border)
+                .pt(px(8.))
                 .child(
                     div()
                         .text_size(px(10.5))
                         .text_color(theme.fg_dim)
-                        .child("A tab holds at most four panes"),
+                        .child("Up to 4 panes per tab"),
                 )
                 .child(
                     div()
                         .text_size(px(10.5))
                         .text_color(theme.fg_dim)
-                        .child("Ctrl+D split"),
+                        .child(format!("{} active", app.active_tab().pane_count())),
                 ),
         )
         .into_any_element();
@@ -363,11 +371,10 @@ pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> Any
         .flex()
         .flex_col()
         .w(px(372.))
-        .rounded(px(8.))
+        .rounded(px(12.))
         .bg(theme.bg)
         .border_1()
         .border_color(theme.border)
-        .shadow_lg()
         .overflow_hidden()
         .occlude()
         .child(body)
@@ -377,12 +384,28 @@ pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> Any
     popup_layer("layouts-popup", header_bottom, Some(84.0), None, 372.0, shell)
 }
 
-fn layout_preview(theme: Theme, hint: &'static str) -> AnyElement {
-    let accent = theme.accent.opacity(0.6);
+fn current_layout(tree: &crate::state::PaneNode) -> Option<&'static str> {
+    use crate::state::PaneNode::{Leaf, Split};
+    use crate::state::SplitDirection::{Column, Row};
+
+    let Split { direction, children, .. } = tree else { return Some("single") };
+    match (direction, children[0].as_ref(), children[1].as_ref()) {
+        (Row, Leaf(_), Leaf(_)) => Some("two-cols"),
+        (Column, Leaf(_), Leaf(_)) => Some("two-rows"),
+        (Row, Leaf(_), right) if current_layout(right) == Some("two-rows") => Some("main-side"),
+        (Row, Leaf(_), right) if current_layout(right) == Some("two-cols") => Some("triple"),
+        (Column, top, bottom)
+            if current_layout(top) == Some("two-cols") && current_layout(bottom) == Some("two-cols") => Some("grid"),
+        _ => None,
+    }
+}
+
+fn layout_preview(theme: Theme, hint: &'static str, selected: bool) -> AnyElement {
+    let fill = if selected { theme.accent.opacity(0.24) } else { theme.fg_dim.opacity(0.13) };
     let mut preview = div()
         .w(px(80.))
         .h(px(50.))
-        .rounded(px(3.))
+        .rounded(px(5.))
         .bg(theme.white_04)
         .relative()
         .overflow_hidden();
@@ -394,8 +417,8 @@ fn layout_preview(theme: Theme, hint: &'static str) -> AnyElement {
             .top(px(y))
             .w(px(w))
             .h(px(h))
-            .rounded(px(1.))
-            .bg(accent)
+            .rounded(px(3.))
+            .bg(fill)
     };
 
     match hint {
@@ -405,7 +428,7 @@ fn layout_preview(theme: Theme, hint: &'static str) -> AnyElement {
                     .absolute()
                     .inset(px(2.))
                     .rounded(px(2.))
-                    .bg(theme.accent.opacity(0.30)),
+                    .bg(fill),
             );
         }
         "side-by-side" => {
@@ -447,8 +470,8 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
     let mut body = div()
         .flex()
         .flex_col()
-        .gap(px(10.))
-        .p(px(12.))
+        .gap(px(12.))
+        .p(px(16.))
         .child(
             div()
                 .flex()
@@ -458,14 +481,14 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(7.))
-                        .child(icon(Icon::Remote, 13.0, theme.accent))
+                        .gap(px(8.))
+                        .child(icon(Icon::Smartphone, 16.0, theme.fg_dim))
                         .child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(px(14.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.fg_dim)
-                                .child("REMOTE CONTROL"),
+                                .text_color(theme.fg)
+                                .child("Remote control"),
                         ),
                 )
                 .child(esc_chip(theme)),
@@ -509,7 +532,7 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
                                             status.clients
                                         )
                                     } else {
-                                        "Active — no connection".to_string()
+                                        "Sharing · no devices connected".to_string()
                                     }),
                             ),
                     )
@@ -517,7 +540,7 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
                         div()
                             .text_size(px(10.))
                             .text_color(if connected { theme.success } else { theme.warning })
-                            .child(if connected { "E2E" } else { "WAITING" }),
+                            .child(if connected { "Encrypted" } else { "Waiting" }),
                     ),
             )
             .child(
@@ -540,9 +563,9 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
                                     .text_size(px(10.5))
                                     .text_color(theme.fg_dim)
                                     .child(if status.public_url.is_some() {
-                                        "PUBLIC LINK"
+                                        "Public link"
                                     } else {
-                                        "SHARE LINK"
+                                        "Share link"
                                     }),
                             )
                             .child(
@@ -599,7 +622,7 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
                 div()
                     .text_size(px(11.5))
                     .text_color(theme.fg_dim)
-                    .child("Drive these terminals from your phone, a browser, or another SpritX. Pairing is one-time and end-to-end encrypted."),
+                    .child("Share your terminals with a phone, browser or another SpritX."),
             )
             .child(
                 primary_button("remote-start", "Start sharing", &theme).on_click(cx.listener(
@@ -610,18 +633,18 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
             );
     }
 
-    let mut footer = div()
+    let footer = div()
         .flex()
         .flex_col()
         .gap(px(2.))
-        .child(menu_row("Remote details", Icon::Info, theme, cx, |this, cx| {
+        .child(menu_row("Sharing and devices", Icon::Info, theme, cx, |this, cx| {
             this.remote_menu_open = false;
             this.modal = Some(Modal::Remote);
             cx.notify();
         }))
         .child(menu_row(
             "Connect from clipboard",
-            Icon::Remote,
+            Icon::Clipboard,
             theme,
             cx,
             |this, cx| {
@@ -629,30 +652,16 @@ pub fn render_remote_menu(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyEl
                 this.remote_connect_from_clipboard(cx);
             },
         ));
-    if status.running {
-        footer = footer.child(menu_row(
-            "Stop remote control",
-            Icon::Stop,
-            theme,
-            cx,
-            |this, cx| {
-                this.remote_menu_open = false;
-                this.remote_stop(cx);
-            },
-        ));
-    }
-
     body = body.child(div().h(px(1.)).bg(theme.border)).child(footer);
 
     let shell = div()
         .flex()
         .flex_col()
         .w(px(340.))
-        .rounded(px(8.))
+        .rounded(px(12.))
         .bg(theme.bg)
         .border_1()
         .border_color(theme.border)
-        .shadow_lg()
         .overflow_hidden()
         .occlude()
         .child(body.into_any_element())
@@ -680,14 +689,14 @@ fn menu_row(
         .items_center()
         .gap(px(8.))
         .px(px(8.))
-        .py(px(6.))
-        .rounded(px(4.))
+        .h(px(32.))
+        .rounded(px(8.))
         .cursor_pointer()
         .text_size(px(12.5))
         .text_color(theme.fg)
         .hover(|s| s.bg(theme.white_06))
         .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
-        .child(icon(ic, 13.0, theme.fg_dim))
+        .child(icon(ic, 16.0, theme.fg_dim))
         .child(label)
         .into_any_element()
 }
@@ -1161,6 +1170,7 @@ const SETTINGS_SECTIONS: [(SettingsSection, Icon); 9] = [
 
 fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
+    let panel_radius = px(12.);
 
     let mut sidebar = div()
         .flex()
@@ -1170,9 +1180,6 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .h_full()
         .gap(px(4.))
         .p(px(12.))
-        .bg(theme.bg_soft)
-        .border_r_1()
-        .border_color(theme.border)
         .child(
             div()
                 .px(px(8.))
@@ -1227,6 +1234,9 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .flex_1()
         .min_w_0()
         .min_h_0()
+        .bg(theme.bg)
+        .rounded(panel_radius)
+        .overflow_hidden()
         .child(
             div()
                 .flex()
@@ -1292,12 +1302,16 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .flex()
         .flex_row()
         .size_full()
+        .p(crate::theme::body_pad())
+        .bg(theme.outer)
+        .rounded(panel_radius)
+        .overflow_hidden()
         .font_family(crate::terminal::appearance().font_family)
         .child(sidebar)
         .child(content)
         .into_any_element();
 
-    side_layer("settings-layer", theme, 860.0, panel, cx)
+    side_layer("settings-layer", theme, 860.0, 8.0, panel, cx)
 }
 
 fn settings_summary(section: SettingsSection) -> &'static str {
@@ -1321,7 +1335,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
 
     match section {
         SettingsSection::Appearance => {
-            let term_theme = crate::terminal::configured_term_theme();
+            let term_theme = crate::terminal::term_theme();
             let font_label = crate::terminal::appearance().font_family.to_string();
             let size_editing = matches!(app.settings_field, Some(SettingsField::FontSize));
             let size_value = if size_editing {
@@ -1336,11 +1350,12 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 app.settings.scrollback.to_string()
             };
             body = body
+                .child(appearance_preview(theme, &font_label, app.settings.font_size))
                 .child(settings_group(theme, "Typography"))
                 .child(setting_row(
                     theme,
                     "Font family",
-                    "Used across the desktop workspace and terminal panes",
+                    "Applies to the workspace and terminal text",
                     div()
                         .flex()
                         .gap(px(8.))
@@ -1408,11 +1423,6 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         )))
                         .into_any_element(),
                 ))
-                .child(textual_row(
-                    theme,
-                    "Terminal preview",
-                    app.settings.font_size,
-                ))
                 .child(settings_group(theme, "Cursor and scrollback"))
                 .child(setting_row(
                     theme,
@@ -1478,57 +1488,70 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                             div()
                                 .text_size(px(12.))
                                 .text_color(theme.fg_dim)
-                                .child(format!("Active · {}", app.settings.theme)),
+                                .child(format!("Selected · {}", app.settings.theme)),
                         )
                         .child(
                             div()
                                 .text_size(px(10.5))
                                 .text_color(theme.fg_dim)
-                                .child("Terminal colors only"),
+                                .child("Terminal palette"),
                         ),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_wrap()
-                        .gap(px(10.))
+                        .gap(px(8.))
                         .children(app.theme_names.iter().enumerate().map(|(index, name)| {
                             let name = name.to_string();
                             let name_for_click = name.clone();
                             let selected = index == app.selected_theme;
+                            let palette = crate::theme_presets::PRESETS[index].theme();
                             div()
                                 .id(("theme", index))
                                 .flex()
                                 .flex_col()
                                 .gap(px(8.))
-                                .w(px(112.))
+                                .w(px(136.))
+                                .p(px(8.))
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(if selected { theme.bg_soft } else { theme.bg })
+                                .hover(|style| style.bg(theme.bg_soft))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .justify_center()
+                                        .gap(px(6.))
+                                        .h(px(48.))
+                                        .px(px(8.))
+                                        .rounded(px(6.))
+                                        .bg(palette.background)
+                                        .child(div().text_size(px(11.)).text_color(palette.foreground).child("❯ SpritX"))
+                                        .child(
+                                            div().flex().gap(px(4.)).children(
+                                                palette.ansi[1..7].iter().map(|color| {
+                                                    div().w(px(10.)).h(px(4.)).rounded(px(2.)).bg(*color)
+                                                }),
+                                            ),
+                                        ),
+                                )
                                 .child(
                                     div()
                                         .flex()
                                         .items_center()
-                                        .justify_center()
-                                        .h(px(40.))
-                                        .rounded(px(6.))
-                                        .bg(theme.bg_soft)
-                                        .border_1()
-                                        .border_color(if selected {
-                                            theme.accent
-                                        } else {
-                                            theme.border
-                                        })
-                                        .text_size(px(13.))
-                                        .text_color(theme.fg)
-                                        .child("❯"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
+                                        .justify_between()
+                                        .gap(px(4.))
+                                        .text_size(px(11.))
                                         .text_color(if selected {
                                             theme.fg
                                         } else {
                                             theme.fg_dim
                                         })
-                                        .child(name),
+                                        .child(name)
+                                        .when(selected, |row| row.child(icon(Icon::Check, 12.0, theme.accent))),
                                 )
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1542,7 +1565,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 )
                 .child(settings_group(theme, "Palette"))
                 .child(
-                    div().flex().gap(px(10.)).children(
+                    div().flex().flex_wrap().gap(px(12.)).children(
                         [
                             ("Background", ThemeColorKey::Background, term_theme.background),
                             ("Foreground", ThemeColorKey::Foreground, term_theme.foreground),
@@ -1562,7 +1585,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                 .child(
                                     div()
                                         .id(("color-chip", index))
-                                        .h(px(30.))
+                                        .h(px(32.))
                                         .rounded(px(5.))
                                         .bg(color)
                                         .border_1()
@@ -1597,11 +1620,12 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         .id("ansi-toggle")
                         .flex()
                         .items_center()
-                        .gap(px(6.))
-                        .px(px(10.))
-                        .pt(px(8.))
-                        .pb(px(3.))
+                        .gap(px(8.))
+                        .px(px(8.))
+                        .h(px(32.))
+                        .rounded(px(6.))
                         .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg_soft))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.ansi_open = !this.ansi_open;
                             cx.notify();
@@ -1628,8 +1652,8 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                     text_button("appearance-reset", "Reset appearance", &theme).on_click(
                         cx.listener(|this, _, _, cx| {
                             this.settings.font_family =
-                                "JetBrainsMono Nerd Font, monospace".into();
-                            this.settings.font_size = 11.0;
+                                crate::backend::config::AppearanceConfig::default().font_family;
+                            this.settings.font_size = f32::from(crate::backend::config::DEFAULT_TERMINAL_FONT_SIZE);
                             this.settings.cursor_blink = true;
                             this.settings.cursor_style = "Block";
                             this.settings.scrollback = 5_000;
@@ -2230,30 +2254,62 @@ fn settings_group(theme: Theme, label: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-fn textual_row(theme: Theme, label: &'static str, font_size: f32) -> AnyElement {
+fn appearance_preview(theme: Theme, family: &str, font_size: f32) -> AnyElement {
     let palette = crate::terminal::term_theme();
+    let line_height = crate::terminal::term_line_height();
+    let cell_width = crate::terminal::cell_width();
+    let (cursor_width, cursor_height) = match crate::terminal::appearance().cursor_shape {
+        crate::terminal::CursorShape::Bar => (2., line_height),
+        crate::terminal::CursorShape::Underline => (cell_width, 2.),
+        crate::terminal::CursorShape::Block => (cell_width, line_height),
+    };
     div()
         .flex()
         .flex_col()
-        .gap(px(8.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.bg_soft)
         .child(
             div()
-                .text_size(px(11.))
-                .text_color(theme.fg_dim)
-                .child(label),
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(8.))
+                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child("Terminal preview"))
+                .child(
+                    div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                        .text_size(px(11.)).text_color(theme.fg_dim)
+                        .child(format!("{family} · {font_size:.0}px")),
+                ),
         )
         .child(
             div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .mx(px(4.))
+                .mb(px(4.))
                 .px(px(12.))
                 .py(px(12.))
-                .rounded(px(8.))
+                .rounded(px(6.))
                 .bg(palette.background)
-                .border_1()
-                .border_color(theme.border)
                 .text_size(px(font_size))
-                .line_height(px(crate::terminal::term_line_height()))
+                .line_height(px(line_height))
                 .text_color(palette.foreground)
-                .child("❯ echo \"SpritX ready\"\nSpritX ready  0123456789"),
+                .child(
+                    div().flex().items_center().gap(px(8.))
+                        .child(div().text_color(palette.accent).child("❯"))
+                        .child("echo \"SpritX ready\""),
+                )
+                .child("SpritX ready")
+                .child(
+                    div().flex().items_end().gap(px(8.)).h(px(line_height))
+                        .child(div().text_color(palette.accent).child("❯"))
+                        .child(div().w(px(cursor_width)).h(px(cursor_height)).bg(palette.cursor)),
+                ),
         )
         .into_any_element()
 }
@@ -2829,17 +2885,23 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
 
     let head = div()
         .flex()
+        .flex_none()
         .items_center()
         .justify_between()
+        .gap(px(8.))
+        .px(px(16.))
+        .py(px(12.))
+        .border_b_1()
+        .border_color(theme.border)
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(icon(Icon::Smartphone, 17.0, theme.accent))
+                .child(icon(Icon::Smartphone, 16.0, theme.fg_dim))
                 .child(
                     div()
-                        .text_size(px(15.))
+                        .text_size(px(16.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("Remote control"),
                 ),
@@ -2853,24 +2915,29 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                 .child(
                     div()
                         .id("remote-dialog-close")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.))
+                        .rounded(px(6.))
                         .cursor_pointer()
                         .text_color(theme.fg_dim)
-                        .hover(|s| s.text_color(theme.fg))
+                        .hover(|s| s.bg(theme.white_06).text_color(theme.fg))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.modal = None;
                             cx.notify();
                         }))
-                        .child(icon(Icon::X, 18.0, theme.fg_dim)),
+                        .child(icon(Icon::X, 16.0, theme.fg_dim)),
                 ),
         );
 
     let badge_text = if !running {
         "Not sharing".to_string()
     } else if connected {
-        format!("{} device(s) connected", status.clients)
+        format!("{} connected", status.clients)
     } else {
         format!(
-            "Sharing on port {} — no connection",
+            "Sharing on port {}",
             status.port
         )
     };
@@ -2878,17 +2945,22 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
     let mut body = div()
         .flex()
         .flex_col()
-        .gap(px(12.))
+        .flex_none()
+        .gap(px(16.))
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
+                .gap(px(8.))
+                .p(px(12.))
+                .rounded(px(8.))
+                .bg(theme.bg_soft)
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(7.))
+                        .gap(px(8.))
                         .child(dot(
                             if connected {
                                 theme.success
@@ -2908,9 +2980,9 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                 )
                 .child(
                     div()
-                        .text_size(px(9.5))
-                        .text_color(theme.success)
-                        .child("E2E ENCRYPTED"),
+                        .text_size(px(10.))
+                        .text_color(theme.fg_dim)
+                        .child("End-to-end encryption"),
                 ),
         );
 
@@ -2918,9 +2990,9 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
         body = body
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(12.))
                     .text_color(theme.fg_dim)
-                    .child("Remote control is off. Start sharing to drive these terminals from a phone or browser."),
+                    .child("Start sharing to pair a device and control this workspace remotely."),
             )
             .child(
                 primary_button("remote-dialog-start", "Start sharing", &theme).on_click(
@@ -3055,7 +3127,9 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                 .child("PAIRED DEVICES"),
         );
 
-        body = body.child(remote_devices(theme, app, cx));
+        body = body
+            .child(settings_group(theme, "Paired devices"))
+            .child(remote_devices(theme, app, cx));
 
         if connected || pairing {
             body = body.child(
@@ -3216,48 +3290,60 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
             .child(links);
     }
 
-    body = body
-        .child(div().flex_1())
-        .child(
+    if running {
+        body = body.child(
             div()
                 .flex()
                 .items_start()
-                .gap(px(7.))
+                .gap(px(8.))
                 .child(icon(Icon::Warning, 12.0, theme.warning))
                 .child(
                     div()
                         .text_size(px(10.))
                         .text_color(theme.fg_dim)
-                        .child("Anyone with the link controls your terminal. Revoke devices you no longer use."),
+                        .child("Share pairing links only with people you trust. Revoke access when a device is no longer needed."),
                 ),
-        )
-        .child(
-            danger_button("remote-dialog-stop", if running { "Stop remote control" } else { "Close" }, &theme)
-                .w_full()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    // Decide from the same live status the label came from,
-                    // never the cached mirror.
-                    if running {
-                        this.remote_stop(cx);
-                    }
-                    this.modal = None;
-                })),
         );
+    }
 
     let panel = div()
-        .id("remote-scroll")
         .flex()
         .flex_col()
-        .gap(px(12.))
-        .p(px(16.))
         .flex_1()
         .min_h_0()
-        .overflow_y_scroll()
         .child(head)
-        .child(body)
+        .child(
+            div()
+                .id("remote-scroll")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p(px(16.))
+                .child(body),
+        )
+        .when(running, |panel| {
+            panel.child(
+                div()
+                    .flex_none()
+                    .p(px(16.))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        danger_button("remote-dialog-stop", "Stop sharing", &theme)
+                            .w_full()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.remote_stop(cx);
+                                this.modal = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+        })
         .into_any_element();
 
-    side_layer("remote-layer", theme, 364.0, panel, cx)
+    side_layer("remote-layer", theme, 364.0, 0.0, panel, cx)
 }
 
 // ---------------------------------------------------------------------------

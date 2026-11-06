@@ -1,3 +1,5 @@
+// Bundled PowerShell prompt and command tracking, passed directly at launch.
+pub const POWERSHELL_INIT: &str = r###"
 # SpritX Pastel: a two-line, true-color Powerline prompt. Scoped to SpritX's
 # child shell; never edits the user's PowerShell profile.
 if (-not $global:SpritXPromptEnabled) {
@@ -62,7 +64,7 @@ if (-not $global:SpritXPromptEnabled) {
             $segment = $segments[$i]
             $bar += $e + '[48;2;' + $segment.Bg + ';38;2;' + $segment.Fg + 'm ' + $segment.Text + ' '
             if ($i + 1 -lt $segments.Count) {
-                $bar += $e + '[38;2;' + $segment.Bg + ';48;2;' + $segments[$i + 1].Bg + 'm'
+                $bar += $e + '[38;2;' + $segment.Bg + ';48;2;' + $segments[$i + 1].Bg + 'm'
             } else { $bar += $e + '[38;2;' + $segment.Bg + ';49m' }
         }
         return $bar + $e + '[0m'
@@ -127,3 +129,4 @@ if (-not $global:SpritXPromptEnabled) {
         return $(if ($bar) { $bar + "`n" } else { '' }) + $e + '[38;2;' + $arrow + 'm❯' + $e + '[0m '
     }
 }
+"###;

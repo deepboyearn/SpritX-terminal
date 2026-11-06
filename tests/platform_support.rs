@@ -83,7 +83,7 @@ mod windows {
     fn prompt_header_fits_small_split_panes() {
         let script = format!(
             "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n{}\n{}",
-            include_str!("../assets/shell/spritx-shell-init.ps1"),
+            platform::POWERSHELL_INIT,
             r#"$result = foreach ($width in @(8,12,24,40,80)) {
                 $bar = Format-SpritXPromptBar 'LongUserNameForTesting' 'long-project-directory-name' 'v26.12.1' '23:10' $width
                 $plain = $bar -replace '\x1b\[[0-9;]*m', ''
@@ -176,17 +176,8 @@ mod windows {
     fn interactive_powershell_reports_command_start_and_completion() {
         use spritx_terminal::backend::osc::{OscEvent, OscParser};
 
-        let mut config = SessionConfig::command(
-            platform::default_shell(),
-            [
-                "-NoLogo".into(),
-                "-NoProfile".into(),
-                "-NoExit".into(),
-                "-Command".into(),
-                include_str!("../assets/shell/spritx-shell-init.ps1").into(),
-            ],
-        );
-        config.env.push(("SPRITX_COMMAND_TRACKING".into(), "1".into()));
+        let mut config = SessionConfig::for_shell(None, &[], None);
+        config.args.insert(0, "-NoProfile".into());
         let mut session = TerminalSession::spawn(config).unwrap();
         assert!(session.wait_for_text("❯", Duration::from_secs(15)));
         session.write_str("Start-Sleep -Milliseconds 750\r").unwrap();
@@ -221,7 +212,7 @@ mod windows {
                 "-NoProfile".into(),
                 "-NoExit".into(),
                 "-Command".into(),
-                include_str!("../assets/shell/spritx-shell-init.ps1").into(),
+                platform::POWERSHELL_INIT.into(),
             ],
         );
         let mut session = TerminalSession::spawn(config).unwrap();
@@ -249,7 +240,7 @@ mod windows {
     fn prompt_reuses_trailing_blank_rows_without_overwriting_output() {
         let script = format!(
             "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n{}\n[Console]::Write(\"KEEP_ONE`r`nKEEP_TWO`r`n`r`n`r`n\"); [Console]::Write((prompt)); [Console]::Write(([string][char]27 + '[?25l' + ('x' * 640) + \"`r`nWRAPPED_INPUT\")); Start-Sleep -Milliseconds 300",
-            include_str!("../assets/shell/spritx-shell-init.ps1"),
+            platform::POWERSHELL_INIT,
         );
         let mut session = powershell(&script);
         assert!(session.wait_for_text("WRAPPED_INPUT", Duration::from_secs(15)), "{}", session.screen_text());
@@ -265,7 +256,7 @@ mod windows {
     fn powershell_prompt_reports_the_real_working_directory() {
         let script = format!(
             "{}\n$null = prompt; [Console]::WriteLine('DONE')",
-            include_str!("../assets/shell/spritx-shell-init.ps1")
+            platform::POWERSHELL_INIT
         );
         let mut session = powershell(&script);
         let bytes = {

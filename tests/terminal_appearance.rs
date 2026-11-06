@@ -49,4 +49,26 @@ fn appearance_is_configurable_and_scales_line_height() {
     assert!(terminal::term_theme().background.l < 0.5);
     terminal::set_light_workspace(true);
     assert_eq!(terminal::term_theme().background, custom_light.background);
+
+    let mut parser = vt100::Parser::new(
+        std::num::NonZeroU16::new(4).unwrap(),
+        std::num::NonZeroU16::new(40).unwrap(),
+        0,
+    );
+    parser.process(
+        "\x1b[38;2;250;179;135m\x1b[48;2;250;179;135;38;2;30;30;46m folder \x1b[0m\r\n\x1b[48;2;250;179;135mordinary output\x1b[0m"
+            .as_bytes(),
+    );
+    terminal::set_light_workspace(false);
+    terminal::set_term_theme(pastel);
+    let original = terminal::term_row(parser.screen(), 0, pastel.foreground, pastel.background);
+    let light = spritx_terminal::theme_presets::SPRITX_LIGHT.theme();
+    terminal::set_light_workspace(true);
+    terminal::set_term_theme(light);
+    let recolored = terminal::term_row(parser.screen(), 0, light.foreground, light.background);
+    assert_ne!(original.spans[1].colors.bg, recolored.spans[1].colors.bg);
+    assert_eq!(recolored.spans[0].colors.fg, light.ansi[3]);
+    assert_eq!(recolored.spans[1].colors.bg, Some(light.ansi[3]));
+    let output = terminal::term_row(parser.screen(), 1, light.foreground, light.background);
+    assert_eq!(output.spans[0].colors.bg, original.spans[1].colors.bg);
 }

@@ -1796,12 +1796,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
   @media(max-width:480px){#dim{display:none}#bar{gap:4px;padding:0 5px}#bar button{padding-inline:5px;font-size:11px}}
   #dc{color:var(--bad)!important}
   #tabbar{flex:none;display:flex;align-items:center;gap:6px;padding:4px 6px}
-  #sessions{display:flex;align-items:center;min-width:0;overflow-x:auto;scrollbar-width:none;background:var(--raised);border-radius:18px;padding:3px;gap:2px}
+  #sessions{display:flex;align-items:center;min-width:0;overflow-x:auto;scrollbar-width:none;padding:3px;gap:6px}
   #sessions:empty{display:none}
-  .session{display:flex;align-items:center;gap:6px;flex:none;max-width:180px;border:0;border-radius:15px;padding:6px 10px;background:transparent;color:var(--muted)}
-  .session[aria-pressed=true]{background:var(--surface);color:var(--text);font-weight:600}
+  .session{display:flex;align-items:center;gap:6px;flex:none;max-width:180px;border:3px solid var(--raised);border-radius:18px;padding:6px 10px;background:var(--raised);color:var(--muted)}
+  .session[aria-pressed=true]{background:#fff;color:var(--text);font-weight:600}
   [data-theme=dark] .session[aria-pressed=true]{background:#3a3a3d}
   .session-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .session-pane-count{font-size:10px;white-space:nowrap;color:var(--muted)}
   .job-status{font-size:10px;white-space:nowrap;color:var(--good)}
   .job-status.failed{color:var(--bad)}
   .job-wave{display:inline-flex;align-items:center;gap:2px;height:10px}
@@ -2111,7 +2112,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
       tab.type='button'; tab.className='session'; tab.setAttribute('aria-pressed',String(selected));
       var title=document.createElement('span');
       title.className='session-label'; title.textContent=gr.name;
-      tab.appendChild(title); addJobStatus(tab,gr.panes);
+      tab.appendChild(title);
+      if(gr.panes.length>1){
+        var count=document.createElement('span');
+        count.className='session-pane-count'; count.textContent=gr.panes.length+' panes';
+        tab.appendChild(count);
+      }
+      addJobStatus(tab,gr.panes);
       tab.addEventListener('click',function(){if(gr.panes.length>1) openPicker(); openTabGroup(gr);});
       strip.appendChild(tab);
     });
@@ -2161,9 +2168,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
     var panes = gr ? gr.panes : [];
     panes.forEach(function(it, i){
       var live = it.id===pickActive;
-      pickList.appendChild(makeRow(String(i+1), 'Terminal ' + (i+1),
+      var row=makeRow(String(i+1), it.title || ('Pane ' + (i+1)),
         live ? '● live now' : 'tap to open',
-        { on: live, fn: function(){ chooseTerminal(it.id); } }));
+        { on: live, fn: function(){ chooseTerminal(it.id); } });
+      addJobStatus(row,[it]); pickList.appendChild(row);
     });
     pickFoot.textContent = panes.length + (panes.length===1?' terminal':' terminals');
   }

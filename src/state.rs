@@ -510,7 +510,7 @@ impl Default for SettingsData {
     fn default() -> Self {
         Self {
             font_family: "JetBrainsMono Nerd Font".into(),
-            font_size: 11.0,
+            font_size: f32::from(crate::backend::config::DEFAULT_TERMINAL_FONT_SIZE),
             cursor_blink: true,
             cursor_style: "Block",
             scrollback: 5_000,

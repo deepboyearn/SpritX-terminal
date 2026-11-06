@@ -265,7 +265,7 @@ impl Default for TerminalAppearance {
     fn default() -> Self {
         Self {
             font_family: SharedString::from(crate::theme::MONO_FONT),
-            font_size: 11.0,
+            font_size: f32::from(crate::backend::config::DEFAULT_TERMINAL_FONT_SIZE),
             scrollback: DEFAULT_SCROLLBACK,
             cursor_shape: CursorShape::Block,
             cursor_blink: true,
@@ -357,17 +357,7 @@ fn matching_term_theme(configured: TerminalTheme, light: bool) -> TerminalTheme 
     if !light {
         return crate::theme_presets::PRESETS[0].theme();
     }
-    TerminalTheme {
-        background: rgb(0xffffff).into(),
-        foreground: rgb(0x18181b).into(),
-        cursor: rgb(0x18181b).into(),
-        selection: rgb(0xbfd3f5).into(),
-        accent: rgb(0x405eb0).into(),
-        ansi: [
-            0x18181b, 0xb91c1c, 0x166534, 0x854d0e, 0x1d4ed8, 0x86198f, 0x155e75, 0x52525b,
-            0x3f3f46, 0xdc2626, 0x15803d, 0xa16207, 0x2563eb, 0xa21caf, 0x0e7490, 0x71717a,
-        ].map(|color| rgb(color).into()),
-    }
+    crate::theme_presets::SPRITX_LIGHT.theme()
 }
 
 /// Replace the terminal theme. Call at startup and whenever Settings are saved.
@@ -549,11 +539,39 @@ fn cell_colors(
     }
 }
 
+fn prompt_segment_color(color: vt100::Color, palette: TerminalTheme) -> Option<Hsla> {
+    Some(match color {
+        vt100::Color::Rgb(69, 71, 90) => palette.selection,
+        vt100::Color::Rgb(250, 179, 135) => palette.ansi[3],
+        vt100::Color::Rgb(166, 227, 161) => palette.ansi[2],
+        vt100::Color::Rgb(148, 226, 213) => palette.ansi[6],
+        vt100::Color::Rgb(137, 180, 250) => palette.ansi[4],
+        vt100::Color::Rgb(245, 194, 231) => palette.ansi[5],
+        _ => return None,
+    })
+}
+
+fn prompt_segment_ink(background: Hsla) -> Hsla {
+    let rgb = gpui::Rgba::from(background);
+    let linear = |v: f32| {
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let luminance = 0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b);
+    rgb_hsla(if luminance > 0.179 { 0x000000 } else { 0xffffff })
+}
+
 /// Build one visible terminal row (scrollback-offset aware) into styled
 /// spans. `screen.cell(row, ..)` returns the row currently in view for the
 /// active scroll offset, so `row` is simply the on-screen row index.
 pub fn term_row(screen: &vt100::Screen, row: u16, theme_fg: Hsla, theme_bg: Hsla) -> TermRow {
-    let ansi = term_theme().ansi;
+    let palette = term_theme();
+    let ansi = palette.ansi;
+    static PASTEL: OnceLock<TerminalTheme> = OnceLock::new();
+    let pastel = PASTEL.get_or_init(|| crate::theme_presets::PRESETS[0].theme());
+    let recolor = palette.ansi != pastel.ansi || palette.selection != pastel.selection;
+    let first = screen.cell(row, 0).map(|cell| cell.contents());
+    let prompt_bar = recolor && first == Some("") && !screen.alternate_screen();
+    let prompt_arrow = recolor && first == Some("❯") && !screen.alternate_screen();
     let (_, cols) = screen.size();
     let cols = cols.get();
     let default = CellColors {
@@ -579,7 +597,27 @@ pub fn term_row(screen: &vt100::Screen, row: u16, theme_fg: Hsla, theme_bg: Hsla
         let colors = match cell {
             Some(cell) if cell.is_wide_continuation() => prev_colors,
             Some(cell) => {
-                let colors = cell_colors(cell, theme_fg, theme_bg, &ansi);
+                let mut colors = cell_colors(cell, theme_fg, theme_bg, &ansi);
+                if prompt_bar {
+                    let background = prompt_segment_color(cell.bgcolor(), palette);
+                    if let Some(background) = background {
+                        colors.bg = Some(background);
+                    }
+                    if let Some(foreground) = prompt_segment_color(cell.fgcolor(), palette) {
+                        // The separator's foreground is the preceding segment.
+                        colors.fg = foreground;
+                    } else if let Some(background) = background {
+                        if matches!(cell.fgcolor(), vt100::Color::Rgb(205, 214, 244) | vt100::Color::Rgb(30, 30, 46)) {
+                            colors.fg = prompt_segment_ink(background);
+                        }
+                    }
+                } else if prompt_arrow && col == 0 {
+                    match cell.fgcolor() {
+                        vt100::Color::Rgb(166, 227, 161) => colors.fg = ansi[2],
+                        vt100::Color::Rgb(243, 139, 168) => colors.fg = ansi[1],
+                        _ => {}
+                    }
+                }
                 prev_colors = colors;
                 colors
             }
@@ -645,6 +683,41 @@ pub fn span_run(span: &TermSpan) -> TextRun {
         underline: span.underline.then(UnderlineStyle::default),
         strikethrough: None,
     }
+}
+
+pub(crate) fn append_span_runs(span: &TermSpan, runs: &mut Vec<TextRun>) {
+    const PROMPT_FONT: &str = "JetBrainsMonoNL Nerd Font Mono";
+    let base = span_run(span);
+    if base.font.family.as_ref() == PROMPT_FONT {
+        runs.push(base);
+        return;
+    }
+
+    // Use an explicit font run for prompt glyphs. System font fallback does
+    // not reliably find private-use characters in a bundled font.
+    let mut start = 0;
+    let mut prompt_font = false;
+    for (offset, ch) in span.text.char_indices() {
+        let is_prompt = matches!(ch, '\u{e0a0}'..='\u{e0d7}' | '' | '' | '' | '❯');
+        if is_prompt != prompt_font {
+            if offset > start {
+                let mut run = base.clone();
+                run.len = offset - start;
+                if prompt_font {
+                    run.font = font(PROMPT_FONT);
+                }
+                runs.push(run);
+            }
+            start = offset;
+            prompt_font = is_prompt;
+        }
+    }
+    let mut run = base;
+    run.len = span.text.len() - start;
+    if prompt_font {
+        run.font = font(PROMPT_FONT);
+    }
+    runs.push(run);
 }
 
 /// A one-cell run for the `\n` between two grid lines, so the newline carries
@@ -855,6 +928,20 @@ impl TerminalSession {
     /// renderer gives this boundary a small visual gap without inserting a
     /// whole terminal row into the PTY stream.
     pub fn powerline_prompt_row(&self) -> Option<u16> {
+        self.powerline_header_row().filter(|row| *row > 0)
+    }
+
+    pub fn powerline_prompt_end(&self) -> Option<(u16, u16)> {
+        let row = self.powerline_header_row()?;
+        let screen = self.parser.screen();
+        let (_, cols) = screen.size();
+        (0..cols.get()).rev().find_map(|col| {
+            let cell = screen.cell(row, col)?;
+            if cell.contents() == "" { Some((row, col + 1)) } else { None }
+        })
+    }
+
+    fn powerline_header_row(&self) -> Option<u16> {
         let screen = self.parser.screen();
         if screen.alternate_screen() || screen.scrollback() > 0 {
             return None;
@@ -863,7 +950,7 @@ impl TerminalSession {
         // The prompt layout must not follow that visibility flag or stop
         // matching when an input line wraps.
         let (cursor_row, _) = screen.cursor_position();
-        for header in (1..cursor_row).rev() {
+        for header in (0..cursor_row).rev() {
             if screen.cell(header, 0).is_some_and(|cell| cell.contents() == "")
                 && screen.cell(header + 1, 0).is_some_and(|cell| cell.contents() == "❯")
             {
@@ -884,6 +971,7 @@ impl TerminalSession {
     pub fn grid_text(&self, theme_fg: Hsla, theme_bg: Hsla) -> (String, Vec<TextRun>) {
         let _mem = crate::memprof::scope(crate::memprof::Region::GridCache);
         let appearance = appearance();
+        let palette = term_theme();
         let screen = self.parser.screen();
         let (rows_nz, cols_nz) = screen.size();
         let rows = rows_nz.get();
@@ -899,6 +987,8 @@ impl TerminalSession {
                     && cache.font_size_bits == font_size_bits
                     && cache.theme_fg == theme_fg
                     && cache.theme_bg == theme_bg
+                    && cache.ansi == palette.ansi
+                    && cache.selection == palette.selection
                     && cache.rows == rows
                     && cache.cols == cols
                     && cache.scrollback == scrollback
@@ -918,7 +1008,7 @@ impl TerminalSession {
                 if span.text.is_empty() {
                     continue;
                 }
-                runs.push(span_run(span));
+                append_span_runs(span, &mut runs);
                 text.push_str(&span.text);
             }
             if crate::metrics::enabled() {
@@ -944,6 +1034,8 @@ impl TerminalSession {
                 font_size_bits,
                 theme_fg,
                 theme_bg,
+                ansi: palette.ansi,
+                selection: palette.selection,
                 rows,
                 cols,
                 scrollback,
@@ -988,22 +1080,17 @@ fn shell_setup(shell: &str) -> (Vec<String>, Vec<(String, String)>) {
     let config_root = crate::platform::config_dir();
 
     if crate::platform::shell_kind(shell) == crate::platform::ShellKind::PowerShell {
-        let mut args = vec!["-NoLogo".to_string()];
-        if let Some(root) = config_root {
-            let init = root.join("spritx-shell-init.ps1");
-            if std::fs::create_dir_all(&root).is_ok()
-                && std::fs::write(&init, include_str!("../assets/shell/spritx-shell-init.ps1")).is_ok()
-            {
-                args.extend([
-                    "-NoExit".into(),
-                    "-Command".into(),
-                    // Read as data, not as a script file: this works under the
-                    // default Windows execution policy without changing it.
-                    format!(". ([scriptblock]::Create([IO.File]::ReadAllText({})))",
-                        crate::platform::quote_path(&init.to_string_lossy(), crate::platform::ShellKind::PowerShell)),
-                ]);
-            }
-        }
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let command: Vec<u8> = crate::platform::POWERSHELL_INIT
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let args = vec![
+            "-NoLogo".into(),
+            "-NoExit".into(),
+            "-EncodedCommand".into(),
+            STANDARD.encode(command),
+        ];
         return (args, vec![("SPRITX_COMMAND_TRACKING".into(), "1".into())]);
     }
     if crate::platform::shell_kind(shell) == crate::platform::ShellKind::Cmd {
@@ -1180,6 +1267,8 @@ struct GridCache {
     font_size_bits: u32,
     theme_fg: Hsla,
     theme_bg: Hsla,
+    ansi: [Hsla; 16],
+    selection: Hsla,
     rows: u16,
     cols: u16,
     scrollback: usize,

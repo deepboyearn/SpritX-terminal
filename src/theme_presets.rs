@@ -50,6 +50,15 @@ fn hsla(value: &str) -> Hsla {
     rgb(raw).into()
 }
 
+pub const SPRITX_LIGHT: ThemePreset = ThemePreset {
+    name: "SpritX Light",
+    colors: [
+        "#fefefe", "#18181b", "#18181b", "#bfd3f5", "#405eb0", "#18181b", "#b91c1c",
+        "#166534", "#854d0e", "#1d4ed8", "#86198f", "#155e75", "#52525b", "#3f3f46",
+        "#dc2626", "#15803d", "#a16207", "#2563eb", "#a21caf", "#0e7490", "#71717a",
+    ],
+};
+
 /// The presets shown in Settings → Appearance, in display order.
 pub const PRESETS: &[ThemePreset] = &[
     ThemePreset {
@@ -70,6 +79,7 @@ pub const PRESETS: &[ThemePreset] = &[
             "#e6e9f0", // bright black..bright white
         ],
     },
+    SPRITX_LIGHT,
     ThemePreset {
         name: "Catppuccin Mocha",
         colors: [

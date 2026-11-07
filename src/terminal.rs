@@ -19,6 +19,10 @@ pub const DEFAULT_SCROLLBACK: usize = 10_000;
 /// values), so changing the font size keeps the old proportions.
 const LINE_HEIGHT_RATIO: f32 = 19.0 / 13.0;
 const MAX_PENDING: usize = 2 * 1024 * 1024;
+/// Upper bound on grid columns; guards against bogus measurements.
+pub const MAX_COLS: u16 = 1000;
+/// Upper bound on grid rows; guards against bogus measurements.
+pub const MAX_ROWS: u16 = 1000;
 
 pub const DEFAULT_COLS: u16 = 100;
 pub const DEFAULT_ROWS: u16 = 30;
@@ -387,7 +391,7 @@ pub fn wake_stamp() -> WakeStamp {
         .clone()
 }
 
-fn signal_wake() {
+pub(crate) fn signal_wake() {
     if let Ok(mut stamp) = wake_stamp().lock() {
         *stamp = Some(std::time::Instant::now());
     }
@@ -764,13 +768,22 @@ pub struct TermMetrics {
     pub cell_height: f32,
 }
 
+/// Terminal columns require equal ASCII advances. Validate fonts using the
+/// actual platform face rather than a name-based monospace heuristic.
+pub fn font_supports_grid(system: &gpui::TextSystem, family: &str) -> bool {
+    let id = system.resolve_font(&font(family.to_string()));
+    let widths: Option<Vec<f32>> = "0iWm .@".chars().map(|ch|
+        system.advance(id, px(14.), ch).ok().map(|size| f32::from(size.width))).collect();
+    widths.is_some_and(|widths| widths[0] > 0. && widths.iter().all(|w| (*w - widths[0]).abs() < 0.02))
+}
+
 /// Measure the mono cell width against the live display (cached per
 /// font/size); falls back to [`FALLBACK_CELL_WIDTH`] if measurement fails.
 pub fn term_metrics(window: &mut Window) -> TermMetrics {
     let appearance = appearance();
     let key = (appearance.font_family.clone(), appearance.font_size.to_bits());
     let cache = cell_width_cache();
-    let mut guard = cache.lock().expect("cell width lock");
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner()); // recover from poison: cache is derived data
     let width = match guard.as_ref() {
         Some((cached, value)) if *cached == key => *value,
         _ => {
@@ -811,7 +824,7 @@ pub fn cell_width() -> f32 {
     let appearance = appearance();
     let key = (appearance.font_family, appearance.font_size.to_bits());
     let cache = cell_width_cache();
-    let guard = cache.lock().expect("cell width lock");
+    let guard = cache.lock().unwrap_or_else(|e| e.into_inner()); // recover from poison: cache is derived data
     match guard.as_ref() {
         Some((cached, value)) if *cached == key => *value,
         _ => FALLBACK_CELL_WIDTH,
@@ -819,15 +832,16 @@ pub fn cell_width() -> f32 {
 }
 
 /// Compute a grid size fitting the given pixel area; never below `(1, 1)` and
-/// tolerant of zero-sized panes.
+/// tolerant of zero-sized panes. Clamped to [`MAX_COLS`]/[`MAX_ROWS`] so a bad
+/// or oversized measurement cannot request an absurd grid.
 pub fn grid_size(area_width: f32, area_height: f32, metrics: TermMetrics) -> (u16, u16) {
-    let cols = if area_width.is_finite() && area_width > 0.0 {
-        (area_width / metrics.cell_width).floor().max(1.0) as u16
+    let cols = if area_width.is_finite() && area_width > 0.0 && metrics.cell_width.is_finite() && metrics.cell_width > 0.0 {
+        (area_width / metrics.cell_width).floor().clamp(1.0, MAX_COLS as f32) as u16
     } else {
         1
     };
-    let rows = if area_height.is_finite() && area_height > 0.0 {
-        (area_height / metrics.cell_height).floor().max(1.0) as u16
+    let rows = if area_height.is_finite() && area_height > 0.0 && metrics.cell_height.is_finite() && metrics.cell_height > 0.0 {
+        (area_height / metrics.cell_height).floor().clamp(1.0, MAX_ROWS as f32) as u16
     } else {
         1
     };
@@ -905,6 +919,7 @@ impl TerminalSession {
         if self.parser.screen().alternate_screen() {
             return false;
         }
+        if lines < 0 { self.inject_saved_history(); }
         let current = self.parser.screen().scrollback() as isize;
         let target = clamp_scrollback(self.parser.screen(), current - lines);
         let changed = target != self.parser.screen().scrollback();
@@ -928,7 +943,7 @@ impl TerminalSession {
     /// renderer gives this boundary a small visual gap without inserting a
     /// whole terminal row into the PTY stream.
     pub fn powerline_prompt_row(&self) -> Option<u16> {
-        self.powerline_header_row().filter(|row| *row > 0)
+        self.powerline_header_row()
     }
 
     pub fn powerline_prompt_end(&self) -> Option<(u16, u16)> {
@@ -1047,8 +1062,14 @@ impl TerminalSession {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionConfig {
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub track_process: bool,
+    #[serde(default)]
+    pub initial_output: Option<String>,
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
@@ -1062,6 +1083,9 @@ impl Default for SessionConfig {
         let shell = crate::platform::default_shell();
         let (args, env) = shell_setup(&shell);
         Self {
+            display_name: None,
+            track_process: false,
+            initial_output: None,
             program: shell,
             args,
             cwd: crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned()),
@@ -1108,7 +1132,8 @@ fn shell_setup(shell: &str) -> (Vec<String>, Vec<(String, String)>) {
                 && std::fs::write(&prompt, include_str!("../assets/shell/spritx-prompt.bash")).is_ok()
                 && std::fs::write(&rc, body).is_ok()
             {
-                return (vec!["--rcfile".into(), rc.to_string_lossy().into_owned(), "-i".into()], Vec::new());
+                return (vec!["--rcfile".into(), rc.to_string_lossy().into_owned(), "-i".into()],
+                    vec![("SPRITX_COMMAND_TRACKING".into(), "1".into())]);
             }
         }
         return (vec!["-l".into()], Vec::new());
@@ -1125,21 +1150,34 @@ fn shell_setup(shell: &str) -> (Vec<String>, Vec<(String, String)>) {
                 && std::fs::write(&prompt, include_str!("../assets/shell/spritx-prompt.zsh")).is_ok()
                 && std::fs::write(zdot.join(".zshrc"), body).is_ok()
             {
-                return (vec!["-i".into()], vec![("ZDOTDIR".into(), zdot.to_string_lossy().into_owned())]);
+                return (vec!["-i".into()], vec![
+                    ("ZDOTDIR".into(), zdot.to_string_lossy().into_owned()),
+                    ("SPRITX_COMMAND_TRACKING".into(), "1".into()),
+                ]);
             }
         }
         return (vec!["-l".into()], Vec::new());
     }
 
     if shell.ends_with("fish") {
-        let init = scripts.join("spritx-shell-init.fish");
-        if init.exists() {
-            return (
-                vec!["-C".to_string(), format!("source {}", init.display())],
-                Vec::new(),
-            );
-        }
-        return (vec![], Vec::new());
+        let init = r#"
+function __spritx_preexec --on-event fish_preexec
+    printf '\e]133;C\a'
+end
+function __spritx_postexec --on-event fish_postexec
+    set -l result $status
+    printf '\e]133;D;%s\a' $result
+end
+functions -c fish_prompt __spritx_original_prompt
+function fish_prompt
+    set -l spritx_cwd (string replace -a '%' '%25' -- $PWD)
+    set spritx_cwd (string replace -a (printf '\a') '%07' -- $spritx_cwd)
+    set spritx_cwd (string replace -a (printf '\e') '%1B' -- $spritx_cwd)
+    printf '\e]7;file://localhost%s\a' $spritx_cwd
+    __spritx_original_prompt
+end
+"#;
+        return (vec!["-i".into(), "-C".into(), init.into()], vec![("SPRITX_COMMAND_TRACKING".into(), "1".into())]);
     }
 
     (Vec::new(), Vec::new())
@@ -1157,6 +1195,9 @@ impl SessionConfig {
             (Vec::new(), Vec::new())
         };
         Self {
+            display_name: None,
+            track_process: false,
+            initial_output: None,
             program,
             args: if args.is_empty() { default_args } else { args.to_vec() },
             cwd: cwd.or_else(|| crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned())),
@@ -1168,6 +1209,9 @@ impl SessionConfig {
 
     pub fn command(program: impl Into<String>, args: impl IntoIterator<Item = String>) -> Self {
         Self {
+            display_name: None,
+            track_process: true,
+            initial_output: None,
             program: program.into(),
             args: args.into_iter().collect(),
             cwd: crate::backend::files::home_dir().map(|p| p.to_string_lossy().into_owned()),
@@ -1190,6 +1234,7 @@ impl SessionConfig {
 enum SessionBackend {
     Local(LocalPty),
     Remote(RemotePane),
+    Owner(crate::backend::session_owner::Client),
 }
 
 struct LocalPty {
@@ -1234,6 +1279,10 @@ impl vt100::Callbacks for TerminalReplies {
 }
 
 pub struct TerminalSession {
+    parsed_pending: Vec<u8>,
+    restore_pending: Option<String>,
+    keep_on_drop: bool,
+    launch_config: Option<SessionConfig>,
     backend: SessionBackend,
     parser: vt100::Parser<TerminalReplies>,
     /// Output waiting to be parsed. Shared with the PTY reader thread, or with
@@ -1256,6 +1305,29 @@ pub struct TerminalSession {
     /// to cells. The size is the full content area, so clicks in the empty
     /// space past the last column still land on the nearest cell.
     grid_origin: Arc<Mutex<Option<(f32, f32, f32, f32)>>>,
+}
+
+/// A bounded history followed by the exact live screen and terminal modes.
+fn screen_snapshot(screen: &vt100::Screen) -> String {
+    let mut view = screen.clone();
+    let rows = usize::from(screen.size().0.get());
+    let mut offset = screen.scrollback_len().min(200);
+    let mut saved = String::new();
+    while offset > 0 {
+        view.set_scrollback(offset);
+        let count = rows.min(offset);
+        for line in view.contents().lines().take(count) {
+            saved.push_str(line);
+            saved.push_str("\r\n");
+        }
+        offset = offset.saturating_sub(count);
+    }
+    if !saved.is_empty() {
+        for _ in 0..rows { saved.push_str("\r\n"); }
+    }
+    saved.push_str(if screen.alternate_screen() { "\x1b[?1049h" } else { "\x1b[?1049l" });
+    saved.push_str(&screen.state_formatted());
+    saved
 }
 
 /// Cached shaped representation of the whole visible grid. Rebuilt only when
@@ -1303,7 +1375,7 @@ impl TerminalSession {
 
         let child = pair.slave.spawn_command(cmd).context("spawn shell")?;
         let pid = child.process_id();
-        let killer = child.clone_killer();
+        let mut killer = child.clone_killer();
         let reader = pair.master.try_clone_reader().context("pty reader")?;
         let writer = pair.master.take_writer().context("pty writer")?;
         // The slave handle must be closed in the parent or the reader never
@@ -1314,8 +1386,15 @@ impl TerminalSession {
         let dirty = Arc::new(AtomicBool::new(false));
         let exit_code = Arc::new(Mutex::new(None));
 
-        spawn_reader(reader, pending.clone(), dirty.clone());
-        spawn_reaper(child, exit_code.clone());
+        if let Err(error) = spawn_reader(reader, pending.clone(), dirty.clone()) {
+            let _ = killer.kill();
+            return Err(error).context("spawn pty reader");
+        }
+        if let Err(error) = spawn_reaper(child, exit_code.clone()) {
+            // Without a reaper the child would linger as a zombie; kill it so no PTY is orphaned.
+            let _ = killer.kill();
+            return Err(error).context("spawn pty reaper");
+        }
 
         let parser = {
             let _mem = crate::memprof::scope(crate::memprof::Region::Scrollback);
@@ -1328,6 +1407,10 @@ impl TerminalSession {
         };
 
         Ok(Self {
+            parsed_pending: Vec::new(),
+            restore_pending: config.initial_output.clone(),
+            keep_on_drop: false,
+            launch_config: Some(config.clone()),
             backend: SessionBackend::Local(LocalPty {
                 shell_kind: crate::platform::shell_kind(&config.program),
                 writer: Arc::new(Mutex::new(writer)),
@@ -1364,6 +1447,10 @@ impl TerminalSession {
             )
         };
         Self {
+            parsed_pending: Vec::new(),
+            restore_pending: None,
+            keep_on_drop: false,
+            launch_config: None,
             backend: SessionBackend::Remote(RemotePane { link }),
             parser,
             pending,
@@ -1387,6 +1474,7 @@ impl TerminalSession {
         match &self.backend {
             SessionBackend::Local(pty) => Some(pty.shell_kind),
             SessionBackend::Remote(_) => None,
+            SessionBackend::Owner(_) => self.launch_config.as_ref().map(|config| crate::platform::shell_kind(&config.program)),
         }
     }
 
@@ -1394,12 +1482,78 @@ impl TerminalSession {
     pub fn remote_label(&self) -> Option<String> {
         match &self.backend {
             SessionBackend::Remote(pane) => pane.link.server_name(),
-            SessionBackend::Local(_) => None,
+            SessionBackend::Local(_) | SessionBackend::Owner(_) => None,
         }
     }
 
     pub fn spawn_default() -> Result<Self> {
         Self::spawn(SessionConfig::default())
+    }
+
+    pub fn launch_config(&self) -> Option<SessionConfig> {
+        self.launch_config.clone().map(|mut config| {
+            config.cols = self.cols;
+            config.rows = self.rows;
+            config.initial_output = None;
+            config
+        })
+    }
+
+    pub fn spawn_persistent(config: SessionConfig) -> Result<Self> {
+        let connection = crate::backend::session_owner::start(&config)?;
+        Self::attach_persistent(config, connection)
+    }
+
+    pub fn attach_persistent(config: SessionConfig, connection: crate::backend::session_owner::Connection) -> Result<Self> {
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let client = crate::backend::session_owner::Client::attach(connection, Arc::new(Mutex::new(crate::backend::session_owner::Output::default())), dirty.clone())?;
+        let (cols, rows) = (client.cols.max(1), client.rows.max(1));
+        let mut parser = vt100::Parser::new_with_callbacks(
+            NonZeroU16::new(rows).unwrap(), NonZeroU16::new(cols).unwrap(),
+            appearance().scrollback.max(1), TerminalReplies::default(),
+        );
+        parser.process(client.initial.as_bytes());
+        Ok(Self {
+            parsed_pending: Vec::new(),
+            restore_pending: config.initial_output.clone(),
+            keep_on_drop: true,
+            launch_config: Some(config), backend: SessionBackend::Owner(client),
+            parser, pending, dirty, cols, rows, generation: AtomicU64::new(0),
+            grid_cache: Mutex::new(None), selection: None, selecting: false,
+            grid_origin: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub fn owner_connection(&self) -> Option<crate::backend::session_owner::Connection> {
+        match &self.backend { SessionBackend::Owner(client) => Some(client.connection.clone()), _ => None }
+    }
+
+    pub fn owner_status(&self) -> Option<crate::backend::session_owner::Status> {
+        match &self.backend { SessionBackend::Owner(client) => client.status.lock().ok().map(|status| status.clone()), _ => None }
+    }
+
+    pub fn set_keep_on_drop(&mut self, keep: bool) {
+        self.keep_on_drop = keep && matches!(self.backend, SessionBackend::Owner(_));
+    }
+
+    pub fn saved_screen(&self) -> String {
+        if let Some(pending) = &self.restore_pending {
+            let mut parser = vt100::Parser::new(
+                NonZeroU16::new(self.rows).unwrap(), NonZeroU16::new(self.cols).unwrap(), 200,
+            );
+            parser.process(pending.as_bytes());
+            if parser.screen().alternate_screen() {
+                let visible = parser.screen().contents_formatted();
+                parser.process(b"\x1b[?1049l");
+                parser.process(visible.as_bytes());
+            }
+            for _ in 0..self.rows { parser.process(b"\r\n"); }
+            parser.process(screen_snapshot(self.parser.screen()).as_bytes());
+            screen_snapshot(parser.screen())
+        } else {
+            screen_snapshot(self.parser.screen())
+        }
     }
 
     pub fn spawn_command(program: &str, args: &[&str]) -> Result<Self> {
@@ -1412,19 +1566,56 @@ impl TerminalSession {
     /// Feed buffered PTY output into the parser. Returns true if the screen
     /// changed and the UI should repaint.
     pub fn pump_bytes(&mut self) -> Option<Vec<u8>> {
-        let bytes = {
-            let mut pending = self.pending.lock().expect("pending lock");
-            if pending.is_empty() {
-                return None;
-            }
-            std::mem::take(&mut *pending)
+        let (replacement, bytes) = match &self.backend {
+            SessionBackend::Owner(client) => client.take_output(),
+            _ => (None, {
+                let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::take(&mut *pending)
+            }),
         };
+        let mut emitted = std::mem::take(&mut self.parsed_pending);
+        if let Some((cols, rows, snapshot)) = replacement {
+            self.cols = cols.max(1);
+            self.rows = rows.max(1);
+            self.parser = vt100::Parser::new_with_callbacks(
+                NonZeroU16::new(self.rows).unwrap(), NonZeroU16::new(self.cols).unwrap(),
+                appearance().scrollback.max(1), TerminalReplies::default(),
+            );
+            self.parser.process(snapshot.as_bytes());
+            self.clear_selection();
+            // Downstream viewers also replace rather than append history.
+            emitted.extend_from_slice(b"\x1bc");
+            emitted.extend_from_slice(snapshot.as_bytes());
+        }
         self.parser.process(&bytes);
+        emitted.extend_from_slice(&bytes);
+        if emitted.is_empty() { return None; }
         let replies = std::mem::take(&mut self.parser.callbacks_mut().bytes);
         if !replies.is_empty() { let _ = self.write(&replies); }
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.dirty.store(false, Ordering::Relaxed);
-        Some(bytes)
+        Some(emitted)
+    }
+
+    fn inject_saved_history(&mut self) -> bool {
+        if self.restore_pending.is_none() || self.parser.screen().alternate_screen() {
+            return false;
+        }
+        let live = self.parser.screen().state_formatted();
+        let saved = self.restore_pending.take().unwrap();
+        self.parser.process(b"\x1b[0m\x1b[?1049l\x1b[H\x1b[2J");
+        self.parser.process(saved.as_bytes());
+        if self.parser.screen().alternate_screen() {
+            let visible = self.parser.screen().contents_formatted();
+            self.parser.process(b"\x1b[?1049l");
+            self.parser.process(visible.as_bytes());
+        }
+        self.parser.process(b"\r\n[Saved output - new shell below]\r\n");
+        for _ in 0..self.rows { self.parser.process(b"\r\n"); }
+        self.parser.process(live.as_bytes());
+        self.parser.callbacks_mut().bytes.clear();
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     pub fn pump(&mut self) -> bool {
@@ -1527,8 +1718,9 @@ impl TerminalSession {
                 }
                 col += 1;
             }
-            out.push_str(line.trim_end());
-            if row != end_row {
+            let soft_wrap = row != end_row && screen.row_wrapped(row);
+            out.push_str(if soft_wrap { &line } else { line.trim_end() });
+            if row != end_row && !soft_wrap {
                 out.push('\n');
             }
         }
@@ -1537,8 +1729,9 @@ impl TerminalSession {
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         match &self.backend {
+            SessionBackend::Owner(client) => client.write(bytes),
             SessionBackend::Local(pty) => {
-                let mut writer = pty.writer.lock().expect("writer lock");
+                let mut writer = pty.writer.lock().unwrap_or_else(|e| e.into_inner()); // recover from poison: writer is a byte stream, state is stateless
                 writer.write_all(bytes)?;
                 writer.flush()?;
                 Ok(())
@@ -1561,7 +1754,16 @@ impl TerminalSession {
         if cols == self.cols && rows == self.rows {
             return Ok(());
         }
+        if matches!(self.backend, SessionBackend::Owner(_)) {
+            if let SessionBackend::Owner(client) = &self.backend { client.resize(cols, rows)?; }
+            if let Some(bytes) = self.pump_bytes() { self.parsed_pending.extend(bytes); }
+            return Ok(());
+        }
+        // Drain old-width bytes before changing the parser's geometry. Return
+        // them once on the next pump so OSC/history/remote consumers keep them.
+        if let Some(bytes) = self.pump_bytes() { self.parsed_pending.extend(bytes); }
         match &mut self.backend {
+            SessionBackend::Owner(_) => unreachable!(),
             SessionBackend::Local(pty) => pty.master.resize(PtySize {
                 rows,
                 cols,
@@ -1625,7 +1827,8 @@ impl TerminalSession {
 
     pub fn exit_code(&self) -> Option<i32> {
         match &self.backend {
-            SessionBackend::Local(pty) => *pty.exit_code.lock().expect("exit lock"),
+            SessionBackend::Local(pty) => *pty.exit_code.lock().unwrap_or_else(|e| e.into_inner()), // recover from poison
+            SessionBackend::Owner(client) => client.status.lock().unwrap_or_else(|e| e.into_inner()).process_exit, // recover from poison
             // A remote pane hosts no local process; the link itself reports down.
             SessionBackend::Remote(_) => None,
         }
@@ -1634,6 +1837,7 @@ impl TerminalSession {
     pub fn pid(&self) -> Option<u32> {
         match &self.backend {
             SessionBackend::Local(pty) => pty.pid,
+            SessionBackend::Owner(client) => client.pid,
             SessionBackend::Remote(_) => None,
         }
     }
@@ -1644,17 +1848,31 @@ impl TerminalSession {
     }
 
     pub fn set_scrollback(&mut self, offset: usize) {
+        if offset > 0 { self.inject_saved_history(); }
         self.parser.screen_mut().set_scrollback(offset);
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn kill(&mut self) {
         match &mut self.backend {
+            SessionBackend::Owner(client) => client.kill(),
             SessionBackend::Local(pty) => {
                 // Portable-pty only kills the shell; the shell's foreground job may
                 // ignore SIGHUP. Take the process-group id before the shell dies.
                 #[cfg(unix)]
                 let pgid = pty.master.process_group_leader();
+                #[cfg(windows)]
+                if pty.exit_code.lock().ok().is_some_and(|code| code.is_none()) {
+                    if let Some(pid) = pty.pid {
+                        use std::os::windows::process::CommandExt;
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/PID", &pid.to_string(), "/T", "/F"])
+                            .creation_flags(0x08000000)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                    }
+                }
                 let _ = pty.killer.kill();
                 #[cfg(unix)]
                 if let Some(pgid) = pgid {
@@ -1681,7 +1899,7 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        self.kill();
+        if !self.keep_on_drop { self.kill(); }
     }
 }
 
@@ -1689,7 +1907,8 @@ fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     pending: Arc<Mutex<Vec<u8>>>,
     dirty: Arc<AtomicBool>,
-) {
+) -> std::io::Result<()> {
+    let pending_buffer = pending.clone();
     thread::Builder::new()
         .name("spritx-pty-reader".into())
         .spawn(move || {
@@ -1700,12 +1919,16 @@ fn spawn_reader(
                     Ok(n) => {
                         let got = std::time::Instant::now();
                         let _mem = crate::memprof::scope(crate::memprof::Region::Pending);
-                        let mut pending = pending.lock().expect("pending lock");
-                        pending.extend_from_slice(&buf[..n]);
-                        if pending.len() > MAX_PENDING {
-                            let drop = pending.len() - MAX_PENDING;
-                            pending.drain(..drop);
+                        let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
+                        // Backpressure the PTY instead of discarding ANSI or UTF-8 bytes.
+                        while pending.len() >= MAX_PENDING {
+                            drop(pending);
+                            signal_wake();
+                            thread::sleep(std::time::Duration::from_millis(2));
+                            if Arc::strong_count(&pending_buffer) <= 2 { return; }
+                            pending = pending_buffer.lock().unwrap_or_else(|e| e.into_inner());
                         }
+                        pending.extend_from_slice(&buf[..n]);
                         dirty.store(true, Ordering::Relaxed);
                         drop(pending);
                         let handoff = crate::metrics::micros(got.elapsed());
@@ -1718,19 +1941,19 @@ fn spawn_reader(
             }
             dirty.store(true, Ordering::Relaxed);
             signal_wake();
-        })
-        .expect("spawn pty reader");
+        })?;
+    Ok(())
 }
 
-fn spawn_reaper(mut child: Box<dyn Child + Send + Sync>, exit_code: Arc<Mutex<Option<i32>>>) {
+fn spawn_reaper(mut child: Box<dyn Child + Send + Sync>, exit_code: Arc<Mutex<Option<i32>>>) -> std::io::Result<()> {
     thread::Builder::new()
         .name("spritx-pty-reaper".into())
         .spawn(move || {
             if let Ok(status) = child.wait() {
-                *exit_code.lock().expect("exit lock") = Some(status.exit_code() as i32);
+                *exit_code.lock().unwrap_or_else(|e| e.into_inner()) = Some(status.exit_code() as i32);
             }
-        })
-        .expect("spawn pty reaper");
+        })?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1755,6 +1978,25 @@ fn terminate_process_group(pgid: libc::pid_t) {
 
 #[cfg(test)]
 mod query_tests {
+    #[test]
+    fn pty_reader_backpressures_without_losing_escape_sequences_or_unicode() {
+        use super::*;
+        let expected = "\x1b[31mλ漢\x1b[0m\r\n".repeat(220_000).into_bytes();
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let dirty = Arc::new(AtomicBool::new(false));
+        spawn_reader(Box::new(std::io::Cursor::new(expected.clone())), pending.clone(), dirty).unwrap();
+        // Give the producer time to reach the pressure limit before consuming.
+        thread::sleep(std::time::Duration::from_millis(100));
+        assert!(pending.lock().unwrap().len() <= MAX_PENDING + 16 * 1024);
+        let mut received = Vec::new();
+        let started = std::time::Instant::now();
+        while received.len() < expected.len() && started.elapsed().as_secs() < 10 {
+            received.extend(std::mem::take(&mut *pending.lock().unwrap()));
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(received.len(), expected.len());
+        assert_eq!(received, expected);
+    }
     use super::*;
 
     #[test]

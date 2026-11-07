@@ -1,5 +1,12 @@
 // Bundled PowerShell prompt and command tracking, passed directly at launch.
 pub const POWERSHELL_INIT: &str = r###"
+# Windows PowerShell aliases curl to Invoke-WebRequest. Resolve the familiar
+# curl command to the installed native executable inside SpritX sessions.
+$spritxCurl = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+$spritxCurlAlias = Get-Alias curl -ErrorAction SilentlyContinue
+if ($spritxCurl -and $spritxCurlAlias -and $spritxCurlAlias.Definition -eq 'Invoke-WebRequest') {
+    Set-Alias -Name curl -Value $spritxCurl.Source -Scope Global -Option $spritxCurlAlias.Options
+}
 # SpritX Pastel: a two-line, true-color Powerline prompt. Scoped to SpritX's
 # child shell; never edits the user's PowerShell profile.
 if (-not $global:SpritXPromptEnabled) {
@@ -16,6 +23,8 @@ if (-not $global:SpritXPromptEnabled) {
             function global:PSConsoleHostReadLine {
                 $line = & $global:SpritXOriginalReadLine
                 if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    $safeLine = $line -replace '[\x00-\x1f\x7f]', ' '
+                    [Console]::Write([string][char]27 + ']133;E;' + $safeLine + [char]7)
                     [Console]::Write([string][char]27 + ']133;C' + [char]7)
                     $global:SpritXCommandRunning = $true
                 }
@@ -69,29 +78,6 @@ if (-not $global:SpritXPromptEnabled) {
         }
         return $bar + $e + '[0m'
     }
-    function global:Compress-SpritXPromptGap {
-        # PowerShell's table formatter leaves trailing empty rows. Reuse at most
-        # two of those rows; never move across text or unfinished inline output.
-        try {
-            $raw = $Host.UI.RawUI
-            $position = $raw.CursorPosition
-            if ($position.X -ne 0) { return }
-            $width = $raw.BufferSize.Width
-            for ($i = 0; $i -lt 2 -and $position.Y -gt 0; $i++) {
-                $rect = [Management.Automation.Host.Rectangle]::new(0, $position.Y - 1, $width - 1, $position.Y - 1)
-                $cells = $raw.GetBufferContents($rect)
-                $empty = $true
-                foreach ($cell in $cells) {
-                    if ($cell.Character -ne [char]0 -and -not [char]::IsWhiteSpace($cell.Character)) { $empty = $false; break }
-                }
-                if (-not $empty) { break }
-                $position.Y--
-                $raw.CursorPosition = $position
-            }
-        } catch {
-            # Some non-console hosts do not expose their buffer; leave it alone.
-        }
-    }
     function global:prompt {
         $succeeded = $?
         if ($global:SpritXCommandRunning) {
@@ -99,7 +85,6 @@ if (-not $global:SpritXPromptEnabled) {
             $status = if ($succeeded) { 0 } else { 1 }
             [Console]::Write([string][char]27 + ']133;D;' + $status + [char]7)
         }
-        Compress-SpritXPromptGap
         $e = [string][char]27
         $location = Get-Location
         if ($location.Provider.Name -eq 'FileSystem') {

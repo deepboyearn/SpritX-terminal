@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod backend;
 pub mod components;
+pub mod desktop;
 pub mod keys;
 pub mod memprof;
 pub mod metrics;

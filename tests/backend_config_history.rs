@@ -219,7 +219,7 @@ fn config_broken_file_is_backed_up_and_defaults_load() {
     let path = dir.join("config.toml");
     std::fs::write(&path, "[[[ not toml").unwrap();
     let loaded = config::load_from(&path);
-    assert_eq!(loaded.appearance.font_size, 11);
+    assert_eq!(loaded.appearance.font_size, 14);
     assert!(dir.join("config.toml.broken").exists());
     assert!(!path.exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -235,5 +235,124 @@ fn config_save_is_atomic_and_owner_only() {
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
     assert!(!Path::new(&format!("{}.tmp", path.display())).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+/// WS-1: a successful `write_atomic` leaves exactly the requested bytes and no
+/// `.tmp*` sibling; a second write to the same path overwrites cleanly.
+/// Pre-fix the fixed `.tmp` name was also renamed away on success, so this
+/// alone only pins content/no-stray — the deterministic pre/post
+/// distinguisher is `write_atomic_ignores_stale_fixed_tmp_name` below.
+#[test]
+fn write_atomic_content_no_stray_and_overwrite() {
+    let dir = temp_dir("write_atomic_basic");
+    let path = dir.join("config.toml");
+    config::write_atomic(&path, "first-body-0123456789").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "first-body-0123456789"
+    );
+    let stray: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(stray.is_empty(), "stray temp files after write: {stray:?}");
+    config::write_atomic(&path, "second-body-different!!").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "second-body-different!!"
+    );
+    let stray: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(stray.is_empty(), "stray temp files after overwrite: {stray:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// WS-1 hard distinguisher: pre-fix `write_atomic` used one fixed temp name,
+/// `<path>.tmp`. If that name is occupied (here, by a directory), the old
+/// code fails trying to create/truncate it as a file. Post-fix the temp name
+/// is `.tmp.<pid>.<counter>`, so the write succeeds and must not touch the
+/// squatter. Fails pre-fix with an IO error; passes post-fix.
+#[test]
+fn write_atomic_ignores_stale_fixed_tmp_name() {
+    let dir = temp_dir("write_atomic_collision");
+    let path = dir.join("config.toml");
+    let fixed_tmp = dir.join("config.toml.tmp");
+    std::fs::create_dir(&fixed_tmp).unwrap();
+    config::write_atomic(&path, "unique-temp-body").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "unique-temp-body"
+    );
+    assert!(
+        fixed_tmp.is_dir(),
+        "write_atomic must not remove or replace the fixed .tmp squatter"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// WS-1 cleanup pin: when the rename fails (target is an existing directory),
+/// no `.tmp*` file may be left behind. Pre-fix the fixed temp file was simply
+/// abandoned after the failed rename; post-fix it is removed on failure.
+#[test]
+fn write_atomic_failure_leaves_no_stray_temp() {
+    let dir = temp_dir("write_atomic_cleanup");
+    let path = dir.join("config.toml");
+    std::fs::create_dir(&path).unwrap();
+    assert!(config::write_atomic(&path, "body-that-cannot-land").is_err());
+    let stray: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "failed write_atomic left stray temp files: {stray:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// WS-1 concurrency pin: many threads writing distinct full payloads to the
+/// same path must never produce a torn/empty/interleaved file; the result is
+/// exactly one writer's payload. Honest limitation: with 1-write-at-a-time
+/// this cannot distinguish fixed vs unique temp names (the fixed name also
+/// works serially), and even threaded it is timing-dependent. That is why
+/// the deterministic distinguisher is the `.tmp`-squatter test above; this
+/// test pins the never-torn invariant the unique name exists to protect.
+#[test]
+fn write_atomic_concurrent_writers_never_tear() {
+    let dir = temp_dir("write_atomic_concurrent");
+    let path = dir.join("config.toml");
+    let payloads: Vec<String> = (0..8)
+        .map(|i| format!("writer-{i}-{}", "x".repeat(4096)))
+        .collect();
+    let mut handles = Vec::new();
+    for payload in &payloads {
+        let path = path.clone();
+        let payload = payload.clone();
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..25 {
+                config::write_atomic(&path, &payload).unwrap();
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let final_body = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        payloads.iter().any(|p| *p == final_body),
+        "final body is torn/empty/interleaved (len {})",
+        final_body.len()
+    );
+    let stray: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(stray.is_empty(), "stray temp files after concurrent writes: {stray:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

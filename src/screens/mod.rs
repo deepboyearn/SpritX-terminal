@@ -1,4 +1,6 @@
 pub mod app_shell;
+mod cli_launcher;
+mod workspace;
 pub mod file_tree;
 pub mod overlays;
 pub mod pane_tree;

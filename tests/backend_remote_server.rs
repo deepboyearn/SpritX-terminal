@@ -20,7 +20,7 @@ use spritx_terminal::backend::remote::{
     NONCE_LEN, READY, client_session, new_device_id, pair_request, random, to_array, unb64,
 };
 use spritx_terminal::backend::remote_server::{
-    Bind, RemoteInput, RemoteServer, ServerOptions, listing_json,
+    Bind, MAX_CONNECTIONS, RemoteInput, RemoteServer, ServerOptions, listing_json,
 };
 
 // ---------------------------------------------------------------------------
@@ -425,6 +425,35 @@ fn http_get(port: u16, path: &str) -> String {
     response
 }
 
+/// The HTTP response head for a raw WebSocket upgrade attempt, without
+/// requiring the request to succeed. This exposes connection-cap rejection.
+fn raw_ws_upgrade_head(port: u16) -> String {
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).expect("connect for upgrade probe");
+    socket.set_read_timeout(Some(Duration::from_secs(3))).expect("set probe timeout");
+    let request = format!(
+        "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: AAECAwQFBgcICQoLDA0ODw==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    );
+    socket.write_all(request.as_bytes()).expect("send upgrade probe");
+    socket.flush().expect("flush upgrade probe");
+    read_until_double_newline(&mut socket)
+}
+
+fn listing_names(cwd: &std::path::Path, token: &str) -> Vec<String> {
+    let json = listing_json(cwd.to_str(), token);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("listing JSON");
+    assert_eq!(parsed["t"], "ls", "listing shape: {json}");
+    parsed["items"]
+        .as_array()
+        .expect("listing items array")
+        .iter()
+        .map(|item| item[0].as_str().expect("entry name").to_string())
+        .collect()
+}
+
+/// Preserve additions while keeping this file's existing test identities intact.
+///
+/// These are the remote-server regression additions.
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -468,13 +497,15 @@ fn full_handshake_bridges_output_and_input() {
     // Sealed input is handed to the desktop for *this* connection's pane.
     client.send_binary(&ClientFrame::Input(b"ls\r".to_vec()).seal(&mut session.tx));
     let input = harness.wait_for_input(|input| matches!(input, RemoteInput::Write { .. }));
-    assert_eq!(
-        input,
+    match input {
         RemoteInput::Write {
+            conn: 1,
             leaf: 7,
-            bytes: b"ls\r".to_vec()
-        }
-    );
+            generation: 0,
+            bytes,
+        } => assert_eq!(bytes, b"ls\r"),
+        other => panic!("expected a write for leaf 7, got {other:?}"),
+    }
 
     // Resize frames carry the geometry of the client's terminal.
     client.send_binary(&ClientFrame::Resize { cols: 120, rows: 40 }.seal(&mut session.tx));
@@ -505,7 +536,10 @@ fn full_handshake_bridges_output_and_input() {
     let (items, active) = client.expect_tabs(&mut session);
     assert_eq!(active, Some(8));
     assert_eq!(items.len(), 2);
-    client.expect_output(&mut session, b"other pane");
+    let ServerFrame::Output(snapshot) = client.recv_frame(&mut session) else { panic!("missing pane snapshot"); };
+    let mut screen = vt100::Parser::new(std::num::NonZeroU16::new(24).unwrap(), std::num::NonZeroU16::new(80).unwrap(), 0);
+    screen.process(&snapshot);
+    assert_eq!(screen.screen().contents(), "other pane");
     harness.server.ingest(8, b"now the api pane");
     client.expect_output(&mut session, b"now the api pane");
     harness.server.ingest(7, b"no longer watched");
@@ -568,6 +602,7 @@ fn losing_the_shared_pane_falls_back_to_another() {
     // The client switches to pane 8, then the desktop closes that pane.
     client.send_binary(&ClientFrame::SwitchTab(8).seal(&mut session.tx));
     client.expect_tabs(&mut session);
+    client.expect_output(&mut session, b"\x1bc");
     harness.server.set_tabs(vec![TabInfo {
         id: 7,
         title: "shell".into(),
@@ -577,6 +612,7 @@ fn losing_the_shared_pane_falls_back_to_another() {
     }]);
     let (items, active) = client.expect_tabs(&mut session);
     assert_eq!((items.len(), active), (1, Some(7)));
+    client.expect_output(&mut session, b"\x1bc");
     harness.server.ingest(7, b"back home");
     client.expect_output(&mut session, b"back home");
 }
@@ -920,29 +956,21 @@ fn listing_helper_matches_the_original_completion_shape() {
 #[test]
 fn attaching_replays_styled_bytes_not_plain_text() {
     let harness = Harness::start("replay");
-    // Styled output the desktop has already produced: red fg, bold, then reset.
-    harness.server.ingest(7, b"\x1b[31mRED\x1b[0m \x1b[1mBOLD\x1b[0m$ ");
-    harness.server.ingest(7, b"\x1b[?1049halt-screen");
-
+    // A late client must retain current cells and styles even after more
+    // than a replay-tail's worth of output, including a split UTF-8 character.
+    harness.server.ingest(7, &vec![b'x'; 600_000]);
+    harness.server.ingest(7, b"\x1b[?1049h\x1b[H\x1b[2J\x1b[31mRED\x1b[0m \x1b[1mBOLD\x1b[0m ");
+    harness.server.ingest(7, &[0xce]);
+    harness.server.ingest(7, &[0xbb]);
     let (mut client, mut session, _) = harness.pair_and_connect("Pixel");
     harness.accept_attach(&mut client, &mut session);
-
-    let mut rebuilt = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        match client.recv_frame(&mut session) {
-            ServerFrame::Output(bytes) => rebuilt.extend_from_slice(&bytes),
-            other => panic!("expected replayed output, got {other:?}"),
-        }
-        if rebuilt == b"\x1b[31mRED\x1b[0m \x1b[1mBOLD\x1b[0m$ \x1b[?1049halt-screen" {
-            break;
-        }
-    }
-    assert_eq!(
-        rebuilt,
-        b"\x1b[31mRED\x1b[0m \x1b[1mBOLD\x1b[0m$ \x1b[?1049halt-screen",
-        "the client must be rebuilt from the raw stream, SGR and alt-screen intact"
-    );
+    let ServerFrame::Output(bytes) = client.recv_frame(&mut session) else { panic!("missing snapshot"); };
+    let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(24).unwrap(), std::num::NonZeroU16::new(80).unwrap(), 0);
+    parser.process(&bytes);
+    assert!(parser.screen().alternate_screen());
+    assert_eq!(parser.screen().contents(), "RED BOLD λ");
+    assert_eq!(parser.screen().cell(0, 0).unwrap().fgcolor(), vt100::Color::Idx(1));
+    assert!(parser.screen().cell(0, 4).unwrap().bold());
 }
 
 /// A client that attaches to a pane which has produced nothing yet gets the tab
@@ -953,4 +981,100 @@ fn attaching_to_a_quiet_pane_sends_no_replay_frame() {
     let (mut client, mut session, _) = harness.pair_and_connect("Pixel");
     harness.accept_attach(&mut client, &mut session);
     client.expect_quiet(Duration::from_millis(200));
+}
+
+// ---------------------------------------------------------------------------
+// Containment and connection-cap regression tests
+// ---------------------------------------------------------------------------
+
+fn unique_temp_root(tag: &str) -> std::path::PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "spritx_remote_containment_{tag}_{}_{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create containment test root");
+    root
+}
+
+#[test]
+fn listing_tokens_cannot_escape_the_pane_cwd() {
+    let root = unique_temp_root("cwd");
+    let cwd = root.join("inside");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&cwd).expect("create in-cwd directory");
+    std::fs::create_dir_all(&cwd.join("child")).expect("create in-cwd child directory");
+    std::fs::create_dir_all(&outside).expect("create outside directory");
+    std::fs::write(cwd.join("child").join("inside_marker.txt"), b"inside").expect("write in-cwd marker");
+    std::fs::write(cwd.join("cwd_marker.txt"), b"inside").expect("write cwd marker");
+    std::fs::write(outside.join("outside_secret.txt"), b"outside").expect("write outside marker");
+
+    // Pre-fix the token was used directly as the read_dir path, so both the
+    // absolute outside directory and a ../ token leaked outside_secret.txt.
+    let absolute_outside = format!("{}/", outside.to_string_lossy().replace('\\', "/"));
+    assert!(
+        listing_names(&cwd, &absolute_outside).is_empty(),
+        "an absolute token outside cwd must yield no entries"
+    );
+    assert!(
+        listing_names(&cwd, "../outside/").is_empty(),
+        "a ../ token escaping cwd must yield no entries"
+    );
+
+    assert_eq!(listing_names(&cwd, ""), vec!["child", "cwd_marker.txt"]);
+    assert_eq!(listing_names(&cwd, "child/"), vec!["inside_marker.txt"]);
+    let absolute_inside = format!("{}/child/", cwd.to_string_lossy().replace('\\', "/"));
+    assert_eq!(listing_names(&cwd, &absolute_inside), vec!["inside_marker.txt"]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn listing_symlink_escape_is_rejected() {
+    let root = unique_temp_root("symlink");
+    let cwd = root.join("inside");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&cwd).expect("create in-cwd directory");
+    std::fs::create_dir_all(&outside).expect("create outside directory");
+    std::fs::write(outside.join("symlink_secret.txt"), b"outside").expect("write outside marker");
+    std::os::unix::fs::symlink(&outside, cwd.join("escape")).expect("create escape symlink");
+
+    assert!(
+        listing_names(&cwd, "escape/").is_empty(),
+        "canonicalization must resolve the symlink and reject its outside target"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn ws_connection_cap_rejects_excess_and_refills_after_close() {
+    let harness = Harness::start("connection-cap");
+    let port = harness.server.port();
+    let mut held = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        held.push(WsClient::connect(port));
+    }
+
+    let overflow = raw_ws_upgrade_head(port);
+    assert!(
+        overflow.lines().next().unwrap_or_default().to_ascii_lowercase().starts_with("http/1.1 503"),
+        "the overflow upgrade must be refused with 503, got {overflow:?}"
+    );
+
+    drop(held.pop());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut refilled = None;
+    while Instant::now() < deadline {
+        let head = raw_ws_upgrade_head(port);
+        if head.lines().next().unwrap_or_default().to_ascii_lowercase().starts_with("http/1.1 101") {
+            refilled = Some(head);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(refilled.is_some(), "closing one connection must free a slot for a later upgrade");
 }

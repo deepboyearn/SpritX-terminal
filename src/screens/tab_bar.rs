@@ -13,12 +13,12 @@ use crate::theme::{Theme, tab_bar_h};
 
 const TAB_SLIDE_DURATION: Duration = Duration::from_millis(210);
 
-fn activity_wave(color: gpui::Hsla) -> impl IntoElement {
+pub(super) fn activity_wave(color: gpui::Hsla, reduced_motion: bool) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
             static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-            let animate = window.is_window_active();
+            let animate = window.is_window_active() && !reduced_motion;
             let phase = START.get_or_init(Instant::now).elapsed().as_secs_f64()
                 * std::f64::consts::TAU;
             for index in 0..3 {
@@ -66,7 +66,7 @@ impl TabHighlight {
     }
 }
 
-pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
+pub fn render(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
     div()
         .flex()
@@ -78,7 +78,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .border_b_1()
         .border_color(theme.border)
         .when(!app.file_tree_visible, |bar| bar.child(render_lead(app, cx)))
-        .child(render_tabs(app, cx))
+            .child(render_tabs(app, window_active, cx))
         .child(render_new_group(app, cx))
         .child(div().flex_1())
         .child(render_actions(app, cx))
@@ -102,15 +102,29 @@ fn render_lead(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
+fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
     let light = theme.bg.l >= 0.5;
     let selected_fill = gpui::rgb(if light { 0xffffff } else { 0x3a3a3d });
     let offset = app.tab_scroll.offset().x;
     let max_offset = app.tab_scroll.max_offset().width;
     let can_scroll_left = offset > px(1.0);
+    // An empty strip renders nothing: `active_tab()` below would otherwise
+    // be read unconditionally off an index that cannot exist here.
+    if app.tabs.is_empty() {
+        return div()
+            .id("tab-strip")
+            .flex()
+            .min_w_0()
+            .items_center()
+            .gap(px(10.))
+            .p(px(3.))
+            .into_any_element();
+    }
     let can_scroll_right = offset + px(1.0) < max_offset;
-
+    // Defensive clamp: a stale `active_tab` must not desync which tab is
+    // drawn as selected from the one `active_tab()` resolves to.
+    let active_index = app.active_tab.min(app.tabs.len().saturating_sub(1));
     let mut strip = div()
         .id("tab-strip")
         .flex()
@@ -132,10 +146,14 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         }));
 
     for (index, tab) in app.tabs.iter().enumerate() {
-        let active = index == app.active_tab;
+        let active = index == active_index;
         let panes = tab.pane_count();
         let tab_id = tab.id;
-        let title = tab.title.clone();
+        let title = if tab.title.is_empty() {
+            "Terminal".to_string()
+        } else {
+            tab.display_title().to_string()
+        };
         let editing = app.editing_tab == Some(tab_id);
         let editing_title = app.editing_title.clone();
         let branch = tab
@@ -152,6 +170,13 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
             .filter(|leaf| leaf.activity.exit_code.is_some())
             .max_by_key(|leaf| leaf.activity.completed)
             .and_then(|leaf| leaf.activity.exit_code);
+        // A leaf with no live session and not running is dead: surface it
+        // distinctly instead of looking like a healthy idle tab.
+        let dead = !running
+            && tab
+                .leaves
+                .values()
+                .any(|leaf| !app.sessions.contains_key(&leaf.id));
 
         let mut tab_el = div()
             .id(("tab", tab_id as usize))
@@ -233,10 +258,20 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(title),
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(title),
+                    )
+                    .when(!active || !window_active || !app.terminal_has_focus(), |d| {
+                        d.child(dot(theme.danger, 5.).flex_none())
+                    }),
             );
         }
 
@@ -283,10 +318,12 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                 tab_el = tab_el.child(div().flex_none().child(icon(Icon::Smartphone, 12.0, theme.accent)));
             }
             if running {
-                tab_el = tab_el.child(activity_wave(theme.fg_dim));
+                tab_el = tab_el.child(activity_wave(theme.fg_dim, app.settings.reduced_motion));
             } else if let Some(exit_code) = completed {
                 let (label, color) = if exit_code == 0 { ("Done", theme.success) } else { ("Failed", theme.danger) };
                 tab_el = tab_el.child(div().flex_none().text_size(px(10.)).text_color(color).child(label));
+            } else if dead {
+                tab_el = tab_el.child(div().flex_none().text_size(px(10.)).text_color(theme.danger).child("Dead"));
             }
             tab_el = tab_el.child(
                 div()
@@ -312,8 +349,10 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
 
     let scroll = app.tab_scroll.clone();
     let highlight = app.tab_highlight.clone();
-    let selected_index = app.active_tab;
-    let selected_id = app.active_tab().id;
+    let selected_index = active_index;
+    // `active_tab_checked` is the total read path; the empty case returned
+    // above, so this resolves to a real tab.
+    let selected_id = app.active_tab_checked().map_or(0, |tab| tab.id);
     let tab_count = app.tabs.len();
     if highlight.borrow().as_ref().is_none_or(|pill| pill.tab_id != selected_id) {
         scroll.scroll_to_item(selected_index);
@@ -323,19 +362,24 @@ fn render_tabs(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         move |bounds, _, window, _| {
             let offset = scroll.offset();
             // Give each tab its own grey shell around the sliding selection.
-            for index in 0..tab_count {
-                if let Some(mut shell) = scroll.bounds_for_item(index) {
-                    shell.origin += offset - gpui::point(px(3.), px(3.));
-                    shell.size.width += px(6.);
-                    shell.size.height += px(6.);
-                    window.paint_quad(gpui::quad(
-                        shell,
-                        gpui::Corners::all(px(16.)),
-                        theme.bg_soft,
-                        gpui::Edges::all(px(0.)),
-                        gpui::transparent_black(),
-                        gpui::BorderStyle::Solid,
-                    ));
+            // Skip this cosmetic painting once the strip is huge: calling
+            // `bounds_for_item` per tab every frame is O(n) for no visible
+            // gain off-screen. The selection pill below still paints.
+            if tab_count <= 50 {
+                for index in 0..tab_count {
+                    if let Some(mut shell) = scroll.bounds_for_item(index) {
+                        shell.origin += offset - gpui::point(px(3.), px(3.));
+                        shell.size.width += px(6.);
+                        shell.size.height += px(6.);
+                        window.paint_quad(gpui::quad(
+                            shell,
+                            gpui::Corners::all(px(16.)),
+                            theme.bg_soft,
+                            gpui::Edges::all(px(0.)),
+                            gpui::transparent_black(),
+                            gpui::BorderStyle::Solid,
+                        ));
+                    }
                 }
             }
             let Some(mut target) = scroll.bounds_for_item(selected_index) else {
@@ -556,13 +600,17 @@ pub fn render_context_menu(
     cx: &mut Context<SpritXApp>,
 ) -> AnyElement {
     let theme = app.theme;
-    let index = menu.index;
-    let panes = app.tabs.get(index).map(|tab| tab.pane_count()).unwrap_or(1);
+    // Resolve by stable id, not a stored position: closing an earlier tab
+    // shifts positions, and a stale index would act on the wrong tab.
+    let index = app.tab_index_for_id(menu.tab_id);
+    let panes = index.and_then(|i| app.tabs.get(i)).map(|tab| tab.pane_count()).unwrap_or(1);
     let close_label = if panes > 1 {
         format!("Close tab · {panes} panes")
     } else {
         "Close tab".to_string()
     };
+    // Tab is gone: menu already rendered with default label; actions no-op.
+    let tab_id = menu.tab_id;
 
     div()
         .id("tab-context-menu")
@@ -591,7 +639,9 @@ pub fn render_context_menu(
             false,
             theme,
             cx,
-            move |this, cx| this.begin_rename(index, cx),
+            move |this, cx| {
+                if let Some(i) = this.tab_index_for_id(tab_id) { this.begin_rename(i, cx); }
+            },
         ))
         .child(ctx_row(
             "tab-ctx-split-h",
@@ -600,7 +650,9 @@ pub fn render_context_menu(
             false,
             theme,
             cx,
-            move |this, cx| this.split_tab(index, SplitDirection::Row, cx),
+            move |this, cx| {
+                if let Some(i) = this.tab_index_for_id(tab_id) { this.split_tab(i, SplitDirection::Row, cx); }
+            },
         ))
         .child(ctx_row(
             "tab-ctx-split-v",
@@ -609,7 +661,9 @@ pub fn render_context_menu(
             false,
             theme,
             cx,
-            move |this, cx| this.split_tab(index, SplitDirection::Column, cx),
+            move |this, cx| {
+                if let Some(i) = this.tab_index_for_id(tab_id) { this.split_tab(i, SplitDirection::Column, cx); }
+            },
         ))
         .child(div().h(px(1.)).my(px(4.)).bg(theme.border))
         .child(ctx_row(
@@ -628,7 +682,9 @@ pub fn render_context_menu(
             true,
             theme,
             cx,
-            move |this, cx| this.close_tab(index, cx),
+            move |this, cx| {
+                if let Some(i) = this.tab_index_for_id(tab_id) { this.close_tab(i, cx); }
+            },
         ))
         .into_any_element()
 }

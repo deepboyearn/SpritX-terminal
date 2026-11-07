@@ -1,6 +1,9 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use spritx_terminal::backend::{config, history::history_path};
 use spritx_terminal::platform::{self, ShellKind};
 use spritx_terminal::terminal::SessionConfig;
+
+static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn config_history_and_device_store_share_the_platform_directory() {
@@ -63,7 +66,11 @@ fn paths_are_quoted_for_the_selected_shell() {
 
 #[test]
 fn replacing_existing_config_preserves_the_new_value() {
-    let dir = std::env::temp_dir().join(format!("spritx_replace_config_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "spritx_replace_config_{}_{}",
+        std::process::id(),
+        NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
     let path = dir.join("config.toml");
     let mut value = config::AppConfig::default();
     config::save_to(&path, &value).unwrap();
@@ -113,7 +120,11 @@ mod windows {
             ],
         );
         // Exercise a cwd with spaces and Unicode, independent of the user's shell.
-        let dir = std::env::temp_dir().join(format!("spritx windows 测试 {}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "spritx windows 测试 {}_{}",
+            std::process::id(),
+            NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         config.cwd = Some(dir.to_string_lossy().into_owned());
         TerminalSession::spawn(config).expect("spawn PowerShell through ConPTY")
@@ -184,13 +195,16 @@ mod windows {
         let mut parser = OscParser::new();
         let until = Instant::now() + Duration::from_secs(8);
         let mut running = false;
+        let mut command = None;
         while Instant::now() < until {
             if let Some(bytes) = session.pump_bytes() {
                 for timed in parser.feed(&bytes).events {
                     match timed.event {
+                        OscEvent::CommandLine(text) => command = Some(text),
                         OscEvent::OutputStart => running = true,
                         OscEvent::OutputEnd { exit_code } => {
                             assert!(running);
+                            assert_eq!(command.as_deref(), Some("Start-Sleep -Milliseconds 750"));
                             assert_eq!(exit_code, 0);
                             return;
                         }
@@ -237,7 +251,7 @@ mod windows {
     }
 
     #[test]
-    fn prompt_reuses_trailing_blank_rows_without_overwriting_output() {
+    fn prompt_preserves_output_and_intentional_blank_lines() {
         let script = format!(
             "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n{}\n[Console]::Write(\"KEEP_ONE`r`nKEEP_TWO`r`n`r`n`r`n\"); [Console]::Write((prompt)); [Console]::Write(([string][char]27 + '[?25l' + ('x' * 640) + \"`r`nWRAPPED_INPUT\")); Start-Sleep -Milliseconds 300",
             platform::POWERSHELL_INIT,
@@ -247,9 +261,10 @@ mod windows {
         let lines = session.visible_lines();
         let last_output = lines.iter().position(|line| line.contains("KEEP_TWO")).unwrap();
         assert!(lines.iter().any(|line| line.contains("KEEP_ONE")));
-        assert!(!lines[last_output + 1].trim().is_empty(), "extra blank rows before prompt: {lines:?}");
-        assert!(lines[last_output + 2].contains("❯"), "typing row must follow header: {lines:?}");
-        assert_eq!(session.powerline_prompt_row(), Some((last_output + 1) as u16));
+        assert!(lines[last_output + 1].trim().is_empty());
+        assert!(lines[last_output + 2].trim().is_empty());
+        assert!(lines[last_output + 4].contains("❯"), "typing row must follow header: {lines:?}");
+        assert_eq!(session.powerline_prompt_row(), Some((last_output + 3) as u16));
     }
 
     #[test]

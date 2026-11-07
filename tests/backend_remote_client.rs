@@ -158,7 +158,7 @@ fn keystrokes_flow_to_the_peer() {
         .expect("the link accepts input");
     let delivered = within(|| {
         server.take_inputs().into_iter().any(|input| {
-            matches!(input, RemoteInput::Write { leaf: 7, ref bytes } if bytes == b"ls -la\n")
+            matches!(input, RemoteInput::Write { leaf: 7, ref bytes, .. } if bytes == b"ls -la\n")
         })
     });
     assert!(delivered, "keystrokes never arrived at the peer's pane");
@@ -248,11 +248,15 @@ fn a_new_pane_is_rebuilt_with_the_peer_styling() {
     let link = remote_client::connect(&url).expect("connect");
     wait_online(&link);
 
-    assert!(
-        awaits(&link, b"\x1b[32mgreen\x1b[0m"),
-        "the peer's colours must survive into the first paint, got {:?}",
-        String::from_utf8_lossy(&read_outcome(&link))
-    );
+    let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(24).unwrap(), std::num::NonZeroU16::new(80).unwrap(), 0);
+    let until = Instant::now() + TIMEOUT;
+    while Instant::now() < until {
+        parser.process(&read_outcome(&link));
+        if parser.screen().contents().contains("green prompt$") { break; }
+        sleep(Duration::from_millis(10));
+    }
+    assert!(parser.screen().contents().contains("green prompt$"));
+    assert_eq!(parser.screen().cell(0, 0).unwrap().fgcolor(), vt100::Color::Idx(2));
     link.close();
     server.stop();
 }

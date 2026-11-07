@@ -4,20 +4,47 @@
 //! strips the shell-integration markers from a PTY byte stream while recording
 //! where each event fired, plus [`BlockTracker`], which turns that event stream
 //! into finished [`CommandBlock`]s for the blocks panel.
+//!
+//! # Trust boundary
+//!
+//! OSC markers are advisory, not authenticated. Any program writing to the PTY
+//! (a malicious command, `cat` of attacker-influenced data, a paste) can emit
+//! `ESC ] 133 ; …` / `ESC ] 7 ; …` / `ESC ] 7733 ; …` sequences. A forged
+//! marker can therefore spoof a command boundary, exit code, cwd, or command
+//! line, and can hide behind the bytes the user actually sees on screen
+//! because consumed markers are stripped from the passthrough stream. Treat
+//! everything the parser emits as hint-level shell-integration data: never
+//! present command blocks as a trusted, authenticated transcript, and never
+//! act on a forged marker as if the shell had sent it (see the note on
+//! [`OscEvent::CommandLine`] and [`OscEvent::Aliases`]).
 
 use std::time::SystemTime;
 
+/// A parsed shell-integration marker. Every variant is unauthenticated input
+/// from the PTY stream (see the module-level trust boundary): a program can
+/// emit any of these, so consumers must treat values as advisory hints.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OscEvent {
     PromptStart,
     PromptEnd,
     OutputStart,
     OutputEnd { exit_code: i32 },
+    /// Unauthenticated — a forged `133;E` can label a block with a command the
+    /// user never typed. Display-only; never use this as proof of what ran.
+    /// A consumer that needs the real command line must read it from the
+    /// terminal buffer, not from this marker.
     CommandLine(String),
     Cwd(String),
     /// SpritX-specific (OSC 7733): the shell's alias list, base64-encoded as
     /// newline-separated `name\tvalue` rows. Emitted once at shell startup so
     /// the autocomplete can suggest the user's aliases.
+    /// Unauthenticated — any PTY writer can inject alias entries here. This
+    /// parser only forwards the raw payload; it is not authoritative for
+    /// completion or execution. Any future consumer that surfaces aliases must
+    /// require user confirmation before acting on them (inserting text,
+    /// executing, or silently saving them), so a forged dump cannot pre-fill
+    /// or alter what a later action does. `BlockTracker` currently drops
+    /// these events entirely, so no alias entry reaches any consumer today.
     Aliases(String),
 }
 
@@ -165,6 +192,14 @@ impl OscParser {
     }
 }
 
+/// Trust boundary (see the module docs): `buf` is raw PTY output, so any
+/// program can forge the markers handled here — `133;D` exit codes, `133;E`
+/// command lines, OSC 7 cwds, and `7733` alias dumps included. The events
+/// pushed here are unauthenticated hints. This function keeps the ordinary
+/// passthrough contract unchanged: A/B and OSC 7 still reach the screen, the
+/// consumed meta-markers are still stripped from it. Stripping is what lets a
+/// forge hide from the screen, which is why consumers must not treat the
+/// resulting blocks as a trusted transcript.
 fn finalize_osc(buf: &[u8], passthrough: &mut Vec<u8>, events: &mut Vec<TimedEvent>) {
     let event = parse_osc(buf);
     // OSC 133;A (PromptStart) and 133;B (PromptEnd) are forwarded so the
@@ -203,6 +238,10 @@ fn flush_runaway(buf: &[u8], passthrough: &mut Vec<u8>) {
     passthrough.extend_from_slice(buf);
 }
 
+/// Parse one OSC payload into an event. No authentication is possible here:
+/// the caller passes raw PTY bytes, so every variant returned (command
+/// boundaries, exit codes, cwd, command line, alias dump) may be a forge.
+/// Callers must not treat any of them as authoritative — see the module docs.
 fn parse_osc(buf: &[u8]) -> Option<OscEvent> {
     let s = std::str::from_utf8(buf).ok()?;
 
@@ -250,14 +289,19 @@ fn parse_osc(buf: &[u8]) -> Option<OscEvent> {
 }
 
 /// `file://host/C:/path` decodes to `/C:/path`; strip the leading slash before
-/// a Windows drive letter so it's a usable path. No-op for POSIX paths.
+/// a Windows drive letter so it's a usable path. This is a Windows-only
+/// rewrite: a genuine POSIX path that merely looks like `/X:…` (e.g. `/:x`
+/// or `/a:tmp`) must be left alone. Only strip when the remainder really is a
+/// drive path — either exactly `/C:` (`len == 3`) or `/C:` followed by `/` or
+/// `\`, which excludes POSIX oddities like `/a:tmp`.
 fn normalize_cwd(p: String) -> String {
     let b = p.as_bytes();
-    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
-        p[1..].to_string()
-    } else {
-        p
-    }
+    let drive = b.len() >= 3
+        && b[0] == b'/'
+        && b[1].is_ascii_alphabetic()
+        && b[2] == b':'
+        && (b.len() == 3 || b[3] == b'/' || b[3] == b'\\');
+    if drive { p[1..].to_string() } else { p }
 }
 
 fn percent_decode(s: &str) -> String {
@@ -313,7 +357,15 @@ struct PendingBlock {
     started_at: SystemTime,
 }
 
+pub const MAX_CAPTURE_BYTES: usize = 512 * 1024;
+
 impl PendingBlock {
+    fn capture(&mut self, bytes: &[u8]) {
+        // Captured output is a bounded preview; the PTY stream remains lossless.
+        let remaining = MAX_CAPTURE_BYTES.saturating_sub(self.output.len());
+        self.output.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+
     fn new(cwd: Option<String>) -> Self {
         Self {
             command: None,
@@ -366,8 +418,7 @@ impl BlockTracker {
                 self.current
                     .as_mut()
                     .expect("capturing implies a block")
-                    .output
-                    .extend_from_slice(&result.passthrough[cursor..timed.passthrough_idx]);
+                    .capture(&result.passthrough[cursor..timed.passthrough_idx]);
             }
             cursor = timed.passthrough_idx;
             self.handle(timed.event.clone());
@@ -376,8 +427,7 @@ impl BlockTracker {
             self.current
                 .as_mut()
                 .expect("capturing implies a block")
-                .output
-                .extend_from_slice(&result.passthrough[cursor..]);
+                .capture(&result.passthrough[cursor..]);
         }
         result
     }
@@ -391,6 +441,10 @@ impl BlockTracker {
     /// Drain the blocks completed since the last call.
     pub fn take_blocks(&mut self) -> Vec<CommandBlock> {
         std::mem::take(&mut self.completed)
+    }
+
+    pub fn current_command(&self) -> Option<&str> {
+        self.current.as_ref().and_then(|block| block.command.as_deref())
     }
 
     /// Last working directory reported by OSC 7.
@@ -475,5 +529,34 @@ impl BlockTracker {
             cwd: pending.cwd.or_else(|| self.cwd.clone()),
             started_at: pending.started_at,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn large_commands_have_bounded_capture_and_keep_lifecycle_markers() {
+        use super::*;
+        let mut tracker = BlockTracker::new();
+        tracker.feed(b"\x1b]133;E;long-command\x07\x1b]133;C\x07");
+        for _ in 0..100 { tracker.feed(&vec![b'x'; 65536]); }
+        tracker.feed(b"\x1b]133;D;7\x07");
+        let blocks = tracker.take_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].output.len(), MAX_CAPTURE_BYTES);
+        assert_eq!(blocks[0].command.as_deref(), Some("long-command"));
+        assert_eq!(blocks[0].exit_code, Some(7));
+    }
+    use super::normalize_cwd;
+
+    #[test]
+    fn normalize_cwd_strips_only_windows_drive_paths() {
+        // Windows OSC 7 (file://host/C:/…) decodes to /C:/… and must convert.
+        assert_eq!(normalize_cwd("/C:/Users".into()), "C:/Users");
+        assert_eq!(normalize_cwd("/C:".into()), "C:");
+        // POSIX lookalikes must pass through unchanged.
+        assert_eq!(normalize_cwd("/:x".into()), "/:x");
+        assert_eq!(normalize_cwd("/a:tmp".into()), "/a:tmp");
+        assert_eq!(normalize_cwd("/home/user".into()), "/home/user");
     }
 }

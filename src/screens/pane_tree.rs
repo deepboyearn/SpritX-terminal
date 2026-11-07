@@ -1,9 +1,8 @@
 use gpui::{
     AnyElement, Context, CursorStyle, ElementId, Entity, IntoElement, MouseButton,
-    Pixels, Render, SharedString, ScrollWheelEvent, TextRun, Window, canvas, div, prelude::*, px, relative,
+    Pixels, Render, SharedString, ScrollWheelEvent, Window, canvas, div, prelude::*, px, relative,
 };
 
-use crate::components::buttons::dot;
 use crate::components::icons::{Icon, icon};
 use crate::screens::app_shell::{SpritXApp, PaneMenuState, SplitDragState};
 use crate::state::{
@@ -12,9 +11,10 @@ use crate::state::{
 use crate::terminal;
 use crate::theme::{Theme, term_pad_x, term_pad_y};
 
-const PROMPT_GAP_PX: f32 = 6.0;
-const PROMPT_INPUT_GAP_PX: f32 = 2.0;
-const PANE_STATUS_DOT_PX: f32 = 5.0;
+const PROMPT_STATUS_GAP_PX: f32 = 4.0;
+/// Fixed width (px) of the split divider; the drag ratio must be computed
+/// against the container size minus this, since the layout reserves it.
+const DIVIDER_PX: f32 = 8.0;
 
 fn terminal_right_padding() -> Pixels {
     term_pad_x() + px(8.)
@@ -48,73 +48,23 @@ fn paint_prompt_cap(
     }
 }
 
-type GridSection = (String, Vec<TextRun>);
-
-/// Split before one displayed row, dropping the newline at the boundary. Runs
-/// are byte-length aligned with the grid text, including one run per newline.
-fn split_grid_before_row(text: String, runs: Vec<TextRun>, row: u16) -> Option<(GridSection, GridSection)> {
-    let split = text.match_indices('\n').nth(usize::from(row).checked_sub(1)?)?.0;
-    let before = text[..split].to_string();
-    let after = text[split + 1..].to_string();
-    let mut before_runs = Vec::new();
-    let mut after_runs = Vec::new();
-    let mut offset = 0;
-    for run in runs {
-        let end = offset + run.len;
-        if end <= split {
-            before_runs.push(run);
-        } else if offset >= split + 1 {
-            after_runs.push(run);
-        } else if offset != split || run.len != 1 {
-            return None;
-        }
-        offset = end;
-    }
-    Some(((before, before_runs), (after, after_runs)))
-}
-
-fn split_powerline_grid(text: String, runs: Vec<TextRun>, prompt_row: u16) -> Option<(GridSection, GridSection, GridSection)> {
-    let (before, prompt_and_input) = split_grid_before_row(text, runs, prompt_row)?;
-    let (header, input) = split_grid_before_row(prompt_and_input.0, prompt_and_input.1, 1)?;
-    Some((before, header, input))
-}
-
-fn visual_row_top(row: u16, line_h: f32, prompt_row: Option<u16>) -> f32 {
-    let mut top = f32::from(row) * line_h;
-    if let Some(start) = prompt_row {
-        if row >= start { top += PROMPT_GAP_PX; }
-        if row > start { top += PROMPT_INPUT_GAP_PX; }
-    }
-    top
+// ANSI applications address a uniform cell grid. Prompt decoration must never
+// insert pixels between rows as the prompt enters/leaves the visible viewport.
+fn visual_row_top(row: u16, line_h: f32, _prompt_row: Option<u16>) -> f32 {
+    f32::from(row) * line_h
 }
 
 #[cfg(test)]
 mod prompt_gap_tests {
     use super::*;
-
     #[test]
-    fn split_keeps_utf8_runs_and_moves_prompt_and_cursor_together() {
-        let run = |len| TextRun {
-            len,
-            font: gpui::font("Consolas"),
-            color: gpui::rgb(0xffffff).into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let text = "out\nX\n❯ ".to_string();
-        let runs = vec![run(3), run(1), run(4), run(1), run(4)];
-        let ((before, before_runs), (header, header_runs), (input, input_runs)) =
-            split_powerline_grid(text, runs, 1).unwrap();
-        assert_eq!(before, "out");
-        assert_eq!(header, "X");
-        assert_eq!(input, "❯ ");
-        assert_eq!(before_runs.iter().map(|run| run.len).sum::<usize>(), before.len());
-        assert_eq!(header_runs.iter().map(|run| run.len).sum::<usize>(), header.len());
-        assert_eq!(input_runs.iter().map(|run| run.len).sum::<usize>(), input.len());
-        assert_eq!(visual_row_top(0, 16.0, Some(1)), 0.0);
-        assert_eq!(visual_row_top(1, 16.0, Some(1)), 22.0);
-        assert_eq!(visual_row_top(2, 16.0, Some(1)), 40.0);
+    fn prompt_scrolling_does_not_move_output_cursor_or_selection_rows() {
+        for row in 0..100 {
+            let plain = visual_row_top(row, 20., None);
+            for header in [0, 1, 20, 99] {
+                assert_eq!(visual_row_top(row, 20., Some(header)), plain);
+            }
+        }
     }
 }
 
@@ -158,15 +108,7 @@ fn cell_from_position(
     let cols = f32::from(cols.max(1));
     let rows = f32::from(rows.max(1));
     let local_x = x - origin_x;
-    let mut local_y = y - origin_y;
-    let prompt_row = session.powerline_prompt_row();
-    if let Some(start) = prompt_row {
-        if local_y >= f32::from(start + 1) * line_h + PROMPT_GAP_PX + PROMPT_INPUT_GAP_PX {
-            local_y -= PROMPT_GAP_PX + PROMPT_INPUT_GAP_PX;
-        } else if local_y >= f32::from(start) * line_h + PROMPT_GAP_PX {
-            local_y -= PROMPT_GAP_PX;
-        }
-    }
+    let local_y = y - origin_y;
     // Clickable content area: the canvas rect when available, never smaller
     // than the laid-out text grid.
     let content_w = width.max(cols * cell_w);
@@ -225,7 +167,11 @@ fn wheel_notches(delta: gpui::ScrollDelta) -> (i32, i32) {
 }
 
 pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
-    let tab = app.active_tab();
+    let Some(tab) = app.active_tab_checked() else {
+        return div().flex().flex_1().items_center().justify_center()
+            .text_size(px(12.)).text_color(app.theme.fg_dim)
+            .child("Use + to open a terminal").into_any_element();
+    };
     div()
         .flex()
         .flex_1()
@@ -254,7 +200,7 @@ fn render_node(
             let is_row = *direction == SplitDirection::Row;
             let ratio = ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
             let mut container = div()
-                .id(("split", split_id(tab.id, path)))
+                .id(split_name("split", tab.id, path))
                 .flex()
                 .flex_1()
                 .min_w_0()
@@ -280,11 +226,11 @@ fn render_node(
                     let ratio = match drag_direction {
                         SplitDirection::Row => {
                             (f32::from(position.x) - f32::from(bounds.origin.x))
-                                / f32::from(bounds.size.width).max(1.0)
+                                / (f32::from(bounds.size.width) - DIVIDER_PX).max(1.0)
                         }
                         SplitDirection::Column => {
                             (f32::from(position.y) - f32::from(bounds.origin.y))
-                                / f32::from(bounds.size.height).max(1.0)
+                                / (f32::from(bounds.size.height) - DIVIDER_PX).max(1.0)
                         }
                     };
                     if this.set_split_ratio(&drag.path, ratio) {
@@ -329,12 +275,14 @@ fn render_node(
     }
 }
 
-fn split_id(tab_id: u64, path: &[usize]) -> usize {
-    let mut hash = tab_id as usize ^ 0x9e37_79b9;
+/// Element name for a split at `path` in tab `tab_id`, built from the path
+/// itself (not a wrapping hash) so distinct splits can never collide.
+fn split_name(prefix: &str, tab_id: u64, path: &[usize]) -> SharedString {
+    let mut name = format!("{prefix}-{tab_id}");
     for slot in path {
-        hash = hash.wrapping_mul(31).wrapping_add(*slot + 1);
+        name.push_str(&format!("-{slot}"));
     }
-    hash
+    name.into()
 }
 
 fn divider(theme: Theme, is_row: bool, path: &[usize], tab_id: u64) -> AnyElement {
@@ -345,7 +293,7 @@ fn divider(theme: Theme, is_row: bool, path: &[usize], tab_id: u64) -> AnyElemen
         SplitDirection::Column
     };
     let mut base = div()
-        .id(("pane-divider", split_id(tab_id, path)))
+        .id(split_name("pane-divider", tab_id, path))
         .flex_none()
         .flex()
         .items_center()
@@ -369,9 +317,9 @@ fn divider(theme: Theme, is_row: bool, path: &[usize], tab_id: u64) -> AnyElemen
         div().w_full().h(px(1.)).rounded(px(1.)).bg(theme.border)
     };
     base = if is_row {
-        base.w(px(8.)).h_full()
+        base.w(px(DIVIDER_PX)).h_full()
     } else {
-        base.h(px(8.)).w_full()
+        base.h(px(DIVIDER_PX)).w_full()
     };
     base.child(line).into_any_element()
 }
@@ -386,8 +334,10 @@ fn render_leaf(
     let Some(leaf) = tab.leaves.get(&id) else {
         return div().into_any_element();
     };
-    let active = tab.active_leaf == id;
-    let tab_index = app.active_tab;
+    // Capture the stable tab id, not the render-time index: an earlier tab
+    // closing between render and click would shift the index onto a
+    // different tab.
+    let tab_id = tab.id;
 
     let mut pane = div()
         .id(("pane", id as usize))
@@ -403,7 +353,9 @@ fn render_leaf(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                if let Some(tab) = this.tabs.get_mut(tab_index) {
+                // Look the tab up by id (captured above), not by a
+                // render-time index that a tab close could have shifted.
+                if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
                     if tab.leaves.contains_key(&id) {
                         tab.active_leaf = id;
                     }
@@ -446,7 +398,9 @@ fn render_leaf(
         .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
             let mut repaint = false;
             if this.settings.focus_follows_mouse {
-                if let Some(tab) = this.tabs.get_mut(tab_index) {
+                // Same id-based lookup as mouse-down above: a render-time
+                // index could point at a different tab after a close.
+                if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
                     if tab.active_leaf != id && tab.leaves.contains_key(&id) {
                         tab.active_leaf = id;
                         repaint = true;
@@ -627,17 +581,7 @@ fn render_leaf(
         id,
     ));
 
-    let line_height = terminal::term_line_height();
-    let center_offset = px((line_height - PANE_STATUS_DOT_PX) / 2.0);
-    let status = dot(if active { theme.success } else { theme.fg_dim }, PANE_STATUS_DOT_PX)
-        .absolute();
-    let status = match app.session(id).and_then(|session| session.powerline_prompt_end().map(|end| (session, end))) {
-        Some((session, (row, column))) => status
-            .left(term_pad_x() + px(f32::from(column) * terminal::cell_width() + 8.))
-            .top(term_pad_y() + px(visual_row_top(row, line_height, session.powerline_prompt_row())) + center_offset),
-        None => status.top(term_pad_y() + center_offset).right(term_pad_x()),
-    };
-    pane.child(status).into_any_element()
+    pane.into_any_element()
 }
 
 fn render_live_terminal(
@@ -685,13 +629,13 @@ fn render_live_terminal(
     let term_theme = terminal::term_theme();
     let alternate = screen.alternate_screen();
     let prompt_row = session.powerline_prompt_row();
-    let prompt_caps = session.powerline_prompt_end().and_then(|(row, _)| {
+    let prompt_layout = session.powerline_prompt_end().and_then(|(row, _)| {
         let header = session.render_row(row, term_theme.foreground, term_theme.background);
         let first = header.spans.first()?;
         let last = header.spans.last()?;
-        if first.text != "" || last.text != "" || first.colors.bg.is_some() || last.colors.bg.is_some() {
-            return None;
-        }
+        let caps = (first.text == "" && last.text == ""
+            && first.colors.bg.is_none() && last.colors.bg.is_none())
+            .then_some((first.colors.fg, last.colors.fg));
         let mut text = String::new();
         let mut runs = Vec::new();
         for span in &header.spans {
@@ -699,34 +643,20 @@ fn render_live_terminal(
             text.push_str(&span.text);
         }
         let top = px(visual_row_top(row, line_h, prompt_row));
-        Some((top, text, runs, first.colors.fg, last.colors.fg))
+        Some((top, text, runs, caps))
     });
     let font_size = px(appearance.font_size);
+    let status_size = px(appearance.font_size * (5. / 13.));
+    let show_status = app.active_tab().active_leaf == leaf_id && app.terminal_has_focus();
+    let status_color = theme.success;
 
     crate::metrics::add(crate::metrics::Name::Panes, 1);
-    // Keep the grid in up to three shaped text elements. The current
-    // Powerline prompt gets 6px above its header and 2px above its input row.
+    // One shaped text grid with fixed line height: shell redraws, wrapping,
+    // and scrollback cannot change the geometry of previously painted rows.
     let grid = crate::metrics::terminal(|| {
         let (text, runs) = session.grid_text(term_theme.foreground, term_theme.background);
-        let mut grid = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .whitespace_nowrap()
-            .overflow_hidden();
-        if let Some(((before, before_runs), (header, header_runs), (input, input_runs))) =
-            prompt_row.and_then(|row| split_powerline_grid(text.clone(), runs.clone(), row))
-        {
-            grid = grid
-                .child(gpui::StyledText::new(before).with_runs(before_runs))
-                .child(div().h(px(PROMPT_GAP_PX)).flex_none())
-                .child(gpui::StyledText::new(header).with_runs(header_runs))
-                .child(div().h(px(PROMPT_INPUT_GAP_PX)).flex_none())
-                .child(gpui::StyledText::new(input).with_runs(input_runs));
-        } else {
-            grid = grid.child(gpui::StyledText::new(text).with_runs(runs));
-        }
-        grid
+        div().flex().flex_col().flex_1().whitespace_nowrap().overflow_hidden()
+            .child(gpui::StyledText::new(text).with_runs(runs))
     });
 
     // Absolute canvas that records where the grid content starts, so mouse
@@ -744,21 +674,40 @@ fn render_live_terminal(
             }
         },
         move |bounds: gpui::Bounds<Pixels>, _: (), window: &mut Window, _cx: &mut gpui::App| {
-            if let Some((top, text, runs, opening, closing)) = prompt_caps {
+            let mut status_origin = bounds.origin
+                + gpui::point(bounds.size.width - status_size, px(0.));
+            if let Some((top, text, runs, caps)) = prompt_layout {
                 let layout = window.text_system().layout_line(&text, font_size, &runs, None);
-                let start_width = layout.x_for_index(''.len_utf8());
-                let end_x = layout.x_for_index(text.len() - ''.len_utf8());
                 let origin = bounds.origin + gpui::point(px(0.), top);
-                for (x, width, color, opening) in [
-                    (px(0.), start_width, opening, true),
-                    (end_x, layout.width - end_x, closing, false),
-                ] {
-                    let cap_bounds = gpui::Bounds::new(
-                        origin + gpui::point(x, px(0.)),
-                        gpui::size(width, px(line_h)),
-                    );
-                    paint_prompt_cap(window, cap_bounds, color, term_theme.background, opening);
+                status_origin = origin + gpui::point(layout.width + px(PROMPT_STATUS_GAP_PX), px(0.));
+                if let Some((opening, closing)) = caps {
+                    let start_width = layout.x_for_index(''.len_utf8());
+                    let end_x = layout.x_for_index(text.len() - ''.len_utf8());
+                    for (x, width, color, opening) in [
+                        (px(0.), start_width, opening, true),
+                        (end_x, layout.width - end_x, closing, false),
+                    ] {
+                        let cap_bounds = gpui::Bounds::new(
+                            origin + gpui::point(x, px(0.)),
+                            gpui::size(width, px(line_h)),
+                        );
+                        paint_prompt_cap(window, cap_bounds, color, term_theme.background, opening);
+                    }
                 }
+            }
+            if show_status && window.is_window_active() {
+                let dot_bounds = gpui::Bounds::new(
+                    status_origin + gpui::point(px(0.), (px(line_h) - status_size) / 2.),
+                    gpui::size(status_size, status_size),
+                );
+                window.paint_quad(gpui::quad(
+                    dot_bounds,
+                    gpui::Corners::all(status_size / 2.),
+                    status_color,
+                    gpui::Edges::all(px(0.)),
+                    gpui::transparent_black(),
+                    gpui::BorderStyle::Solid,
+                ));
             }
         },
     )
@@ -900,9 +849,7 @@ fn render_live_terminal(
                     return;
                 }
                 let width = f32::from(bounds.size.width - term_pad_x() - terminal_right_padding());
-                // Leave room for the prompt spacer without clipping the last
-                // terminal row when the shell reaches the pane bottom.
-                let height = f32::from(bounds.size.height) - 2.0 * f32::from(term_pad_y()) - PROMPT_GAP_PX - PROMPT_INPUT_GAP_PX;
+                let height = f32::from(bounds.size.height) - 2.0 * f32::from(term_pad_y());
                 if width <= 0.0 || height <= 0.0 {
                     return; // collapsed pane: keep the current size
                 }
@@ -958,7 +905,7 @@ pub fn render_context_menu(
         .id("pane-context-menu")
         .absolute()
         .left(px(menu.x).clamp(px(0.), (viewport.width - px(220.)).max(px(0.))))
-        .top(px(menu.y).clamp(px(0.), (viewport.height - px(256.)).max(px(0.))))
+        .top(px(menu.y).clamp(px(0.), (viewport.height - px(330.)).max(px(0.))))
         .w(px(220.))
         .flex()
         .flex_col()
@@ -1000,6 +947,12 @@ pub fn render_context_menu(
             },
         ))
         .child(div().h(px(1.)).my(px(4.)).bg(theme.border))
+        .child(menu_row("pane-ctx-interrupt", "Interrupt process", Icon::Stop, false, theme, cx,
+            move |this, cx| { this.focus_leaf(leaf, cx); this.interrupt_pane(leaf, cx); }))
+        .when(!app.session(leaf).is_some_and(|session| session.is_remote()), |menu| menu.child(
+            menu_row("pane-ctx-force-stop", "Force stop & restart", Icon::Refresh, true, theme, cx,
+                move |this, cx| { this.focus_leaf(leaf, cx); this.force_stop_pane(leaf, cx); })))
+        .child(div().h(px(1.)).my(px(4.)).bg(theme.border))
         .child(menu_row(
             "pane-ctx-split-h",
             "Split right",
@@ -1008,7 +961,12 @@ pub fn render_context_menu(
             theme,
             cx,
             move |this, cx| {
-                this.split_leaf_in_tab(this.active_tab, leaf, SplitDirection::Row, cx)
+                // Resolve the owning tab from the leaf at click time: after a
+                // tab switch with this menu open, `active_tab` is a different
+                // tab and the split would silently no-op against it.
+                if let Some(index) = this.tabs.iter().position(|t| t.leaves.contains_key(&leaf)) {
+                    this.split_leaf_in_tab(index, leaf, SplitDirection::Row, cx)
+                }
             },
         ))
         .child(menu_row(
@@ -1019,7 +977,10 @@ pub fn render_context_menu(
             theme,
             cx,
             move |this, cx| {
-                this.split_leaf_in_tab(this.active_tab, leaf, SplitDirection::Column, cx)
+                // Same leaf-based resolution as split-right above.
+                if let Some(index) = this.tabs.iter().position(|t| t.leaves.contains_key(&leaf)) {
+                    this.split_leaf_in_tab(index, leaf, SplitDirection::Column, cx)
+                }
             },
         ))
         .child(menu_row(
@@ -1104,12 +1065,4 @@ fn menu_row(
         .child(icon(ic, 14.0, icon_color))
         .child(label)
         .into_any_element()
-}
-
-pub fn split_ratio_bounds(ratio: f32) -> Pixels {
-    px(ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO) * 1000.0)
-}
-
-pub fn child_basis(ratio: f32) -> gpui::DefiniteLength {
-    relative(ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO))
 }

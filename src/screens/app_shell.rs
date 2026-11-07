@@ -35,7 +35,6 @@ const PALETTE_CONNECT_ROW: usize = usize::MAX;
 #[derive(Clone, Debug)]
 pub struct TabMenuState {
     pub tab_id: TabId,
-    pub index: usize,
     pub x: f32,
     pub y: f32,
 }
@@ -61,6 +60,7 @@ pub struct SplitDragState {
 type RemoteStamp = (bool, usize, bool, Option<u64>, Vec<u64>);
 
 pub struct SpritXApp {
+    pub(super) desktop_quitting: bool,
     pub theme: Theme,
     pub tabs: Vec<TabState>,
     pub active_tab: usize,
@@ -75,6 +75,7 @@ pub struct SpritXApp {
     pub(super) file_list_scroll: gpui::UniformListScrollHandle,
     pub(super) file_scroll_thumb_visible: bool,
     pub(super) file_scroll_hide_task: Option<gpui::Task<()>>,
+    pub(super) cli_launcher: super::cli_launcher::Launcher,
     pub modal: Option<Modal>,
     pub layouts_open: bool,
     pub remote_menu_open: bool,
@@ -98,6 +99,9 @@ pub struct SpritXApp {
     remote_device_count: Option<usize>,
     pub toast: Option<Toast>,
     pub toast_generation: u64,
+    /// The pending toast dismissal; replaced per toast so bursts do not
+    /// accumulate detached timers (dropping the old Task cancels it).
+    pub(super) toast_task: Option<gpui::Task<()>>,
     pub settings: SettingsData,
     pub settings_section: crate::state::SettingsSection,
     pub palette_query: String,
@@ -118,7 +122,7 @@ pub struct SpritXApp {
     pub recording_action: Option<String>,
     pub file_tree_ui: Option<String>,
     pub tab_scroll: ScrollHandle,
-    command_completion: u64,
+    pub(super) command_completion: u64,
     pub(super) tab_highlight: std::rc::Rc<std::cell::RefCell<Option<super::tab_bar::TabHighlight>>>,
     pub tab_menu: Option<TabMenuState>,
     pub pane_menu: Option<PaneMenuState>,
@@ -129,6 +133,14 @@ pub struct SpritXApp {
     pub session_errors: HashMap<u64, String>,
     pub block_trackers: HashMap<u64, BlockTracker>,
     pub history: Option<HistoryStore>,
+    pub recent_projects: Vec<crate::backend::workspace::RecentProject>,
+    pub(super) workspace_last_save: std::time::Instant,
+    pub(super) restored_sessions: HashMap<u64, crate::backend::workspace::SavedSession>,
+    pub(super) owner_seen: HashMap<u64, u64>,
+    pub(super) owner_activation: HashMap<u64, u64>,
+    pub(super) command_started: HashMap<u64, std::time::Instant>,
+    pub(super) notification_tx: std::sync::mpsc::Sender<u64>,
+    pub(super) notification_rx: std::sync::mpsc::Receiver<u64>,
 }
 
 impl SpritXApp {
@@ -139,7 +151,7 @@ impl SpritXApp {
             eprintln!("[spritx] could not register bundled terminal font: {error}");
         }
         let mut available_fonts = cx.text_system().all_font_names();
-        available_fonts.retain(|name| !name.trim().is_empty() && !name.starts_with('.'));
+        available_fonts.retain(|name| !name.trim().is_empty() && !name.starts_with('.') && crate::terminal::font_supports_grid(cx.text_system(), name));
         available_fonts.sort();
         available_fonts.dedup();
         let app_config = AppConfig::load();
@@ -162,7 +174,9 @@ impl SpritXApp {
             )
         });
         let tabs = vec![TabState::single(1, "Terminal", 1)];
+        let (notification_tx, notification_rx) = std::sync::mpsc::channel();
         let mut app = Self {
+            desktop_quitting: false,
             theme,
             tabs,
             active_tab: 0,
@@ -173,12 +187,14 @@ impl SpritXApp {
             cursor_blink_epoch: std::time::Instant::now(),
             file_tree_visible: true,
             file_tree_width: 230.0,
-            file_list_collapsed: true,
+            // Exercise the expanded tree and its background watcher in UI smoke tests.
+            file_list_collapsed: std::env::var("SPRITX_OPEN").as_deref() != Ok("file-tree"),
             file_list_scroll: Default::default(),
             file_scroll_thumb_visible: false,
             file_scroll_hide_task: None,
+            cli_launcher: super::cli_launcher::Launcher::new(app_config.cli_launcher.clone()),
             modal: match std::env::var("SPRITX_OPEN").as_deref() {
-                Ok("settings") => Some(Modal::Settings),
+                Ok("settings" | "settings-general" | "settings-notifications") => Some(Modal::Settings),
                 Ok("palette") => Some(Modal::Palette(PaletteMode::Command)),
                 Ok("remote") => Some(Modal::Remote),
                 _ => None,
@@ -198,8 +214,13 @@ impl SpritXApp {
             remote_device_count: None,
             toast: None,
             toast_generation: 0,
+            toast_task: None,
             settings,
-            settings_section: crate::state::SettingsSection::Appearance,
+            settings_section: match std::env::var("SPRITX_OPEN").as_deref() {
+                Ok("settings-general") => crate::state::SettingsSection::General,
+                Ok("settings-notifications") => crate::state::SettingsSection::Notifications,
+                _ => crate::state::SettingsSection::Appearance,
+            },
             palette_query: String::new(),
             palette_selected: 0,
             theme_names: crate::state::sample_theme_names(),
@@ -223,12 +244,27 @@ impl SpritXApp {
             session_errors: HashMap::new(),
             block_trackers: HashMap::new(),
             history,
+            recent_projects: crate::backend::workspace::load().recent,
+            workspace_last_save: std::time::Instant::now(),
+            restored_sessions: HashMap::new(),
+            owner_seen: HashMap::new(),
+            owner_activation: HashMap::new(),
+            command_started: HashMap::new(),
+            notification_tx, notification_rx,
         };
         crate::terminal::set_appearance(terminal_appearance_from_config(&app_config, &app.settings_fonts));
         crate::terminal::set_term_theme(terminal_theme_from_config(&app_config));
+        app.restore_workspace();
         // Register the wake signal before any reader thread can produce output.
         app.start_terminal_pump(cx);
         app.ensure_sessions();
+        if let Some(tab) = app.active_tab_checked() { app.touch_recent(tab.active_leaf); }
+        super::cli_launcher::start_scanning(&mut app, cx);
+        cx.on_app_quit(|this, _| {
+            this.checkpoint_workspace();
+            async {}
+        }).detach();
+        cx.on_release(|this, _| this.checkpoint_workspace()).detach();
         app
     }
 
@@ -295,6 +331,15 @@ impl SpritXApp {
                         if this.pump_terminals() {
                             cx.notify();
                         }
+                        // Elapsed labels must advance even with reduced motion
+                        // and a quiet CLI that produces no new output.
+                        if this.tabs.iter().any(|tab| tab.leaves.values().any(|leaf| leaf.activity.running)) {
+                            cx.notify();
+                        }
+                        this.poll_notification_activation(cx);
+                        if this.workspace_last_save.elapsed() >= std::time::Duration::from_secs(2) {
+                            this.checkpoint_workspace();
+                        }
                         if this.refresh_remote_links(cx) {
                         cx.notify();
                     }
@@ -324,6 +369,11 @@ impl SpritXApp {
         if self.sessions.contains_key(&leaf) {
             return;
         }
+        if self.tabs.iter().any(|tab| tab.leaves.get(&leaf).is_some_and(|leaf| leaf.remote)) {
+            self.session_errors.insert(leaf, "Reconnect this remote terminal using Remote control.".into());
+            return;
+        }
+        if self.restore_pane_session(leaf) { return; }
         let args = match crate::platform::parse_shell_args(&self.settings.shell_args) {
             Ok(args) => args,
             Err(error) => {
@@ -334,12 +384,13 @@ impl SpritXApp {
         let config = crate::terminal::SessionConfig::for_shell(
             Some(&self.settings.shell_program),
             &args,
-            None,
+            self.tabs.iter().find_map(|tab| tab.leaves.get(&leaf).map(|leaf| leaf.cwd.clone())),
         );
-        match TerminalSession::spawn(config) {
+        match self.spawn_workspace_session(config) {
             Ok(session) => {
                 self.session_errors.remove(&leaf);
                 self.sessions.insert(leaf, session);
+                self.checkpoint_workspace();
             }
             Err(error) => {
                 self.session_errors.insert(leaf, error.to_string());
@@ -374,7 +425,7 @@ impl SpritXApp {
             // Fan the same bytes out to remote clients: the UI parser already
             // consumed them in `pump_bytes`, this only notifies bridges.
             if let Some(server) = self.remote_server.as_ref() {
-                server.ingest(leaf, &bytes);
+                server.ingest_screen(leaf, &bytes, self.sessions.get(&leaf).map(|session| session.screen()));
             }
             let osc_started = std::time::Instant::now();
             let (events, blocks, cwd) = {
@@ -386,11 +437,19 @@ impl SpritXApp {
                 use crate::backend::osc::OscEvent;
                 match event.event {
                     OscEvent::OutputStart => {
+                        self.command_started.insert(leaf, std::time::Instant::now());
                         if let Some(state) = self.leaf_mut(leaf) {
                             state.activity.running = true;
+                            state.activity.completed = 0;
+                            state.activity.exit_code = None;
+                        }
+                        self.start_recent_work(leaf);
+                    }
+                    OscEvent::OutputEnd { exit_code } => {
+                        if self.session(leaf).is_some_and(|session| session.owner_connection().is_none()) {
+                            self.complete_terminal_command(leaf, exit_code);
                         }
                     }
-                    OscEvent::OutputEnd { exit_code } => self.complete_terminal_command(leaf, exit_code),
                     _ => {}
                 }
             }
@@ -402,9 +461,12 @@ impl SpritXApp {
             // OSC 133 blocks are used only to record command history and track
             // the pane's cwd now that the Blocks panel has been removed.
             if let Some(cwd) = cwd {
+                let mut moved = false;
                 if let Some(leaf_state) = self.leaf_mut(leaf) {
+                    moved = leaf_state.cwd != cwd;
                     leaf_state.cwd = cwd;
                 }
+                if moved { self.touch_recent(leaf); }
             }
             for block in blocks {
                 self.append_history(&block);
@@ -414,7 +476,8 @@ impl SpritXApp {
             .filter(|leaf| leaf.activity.running)
             .filter_map(|leaf| Some((leaf.id, self.sessions.get(&leaf.id)?.exit_code()?)))
             .collect();
-        let changed = had_output || !exited.is_empty();
+        let synced = self.sync_owned_status();
+        let changed = had_output || !exited.is_empty() || synced;
         for (leaf, exit_code) in exited {
             self.complete_terminal_command(leaf, exit_code);
         }
@@ -434,8 +497,12 @@ impl SpritXApp {
         state.activity.running = false;
         state.activity.completed = completed;
         state.activity.exit_code = Some(exit_code);
-        if self.settings.notify_sound {
-            crate::platform::play_completion_sound();
+        if self.session(leaf).is_some_and(|session| session.owner_connection().is_none()) {
+            let elapsed = self.command_started.remove(&leaf).map(|at| at.elapsed()).unwrap_or_default();
+            let cwd = self.tabs.iter().find_map(|tab| tab.leaves.get(&leaf).map(|leaf| leaf.cwd.clone())).unwrap_or_default();
+            let sender = self.notification_tx.clone();
+            let name = self.session(leaf).and_then(|session| session.launch_config()).and_then(|config| config.display_name).unwrap_or_else(|| "Command".into());
+            crate::platform::command_completed(&cwd, &name, exit_code, elapsed, move || { let _ = sender.send(leaf); });
         }
     }
 
@@ -678,6 +745,11 @@ impl SpritXApp {
 
     /// Pick a font family from the Appearance dropdown.
     pub fn select_font(&mut self, family: String, cx: &mut Context<Self>) {
+        if !crate::terminal::font_supports_grid(cx.text_system(), &family) {
+            self.settings_menu = None;
+            self.show_toast("Choose a monospace font to keep terminal columns aligned", cx);
+            return;
+        }
         self.settings.font_family = format!("{family}, monospace");
         self.settings_menu = None;
         self.save_settings();
@@ -707,7 +779,7 @@ impl SpritXApp {
         let mut names = cx.text_system().all_font_names();
         names.retain(|name| {
             let trimmed = name.trim();
-            !trimmed.is_empty() && !trimmed.starts_with('.')
+            !trimmed.is_empty() && !trimmed.starts_with('.') && crate::terminal::font_supports_grid(cx.text_system(), name)
         });
         names.sort();
         names.dedup();
@@ -738,7 +810,7 @@ impl SpritXApp {
                             match added {
                                 Ok(()) => {
                                     let after = cx.text_system().all_font_names();
-                                    app.settings_fonts = after.clone();
+                                    app.settings_fonts = after.iter().filter(|name| crate::terminal::font_supports_grid(cx.text_system(), name)).cloned().collect();
                                     match after.iter().find(|name| !before.contains(*name)).cloned() {
                                         Some(family) => app.select_font(family, cx),
                                         None => app.show_toast(
@@ -768,7 +840,7 @@ impl SpritXApp {
 
     pub fn write_active(&mut self, bytes: &[u8]) -> bool {
         crate::metrics::event(&format!("action.write_active bytes={}", bytes.len()));
-        let leaf = self.active_tab().active_leaf;
+        let Some(leaf) = self.active_tab_checked().map(|tab| tab.active_leaf) else { return false; };
         let Some(session) = self.sessions.get_mut(&leaf) else {
             return false;
         };
@@ -785,9 +857,37 @@ impl SpritXApp {
         ok
     }
 
+    /// Send the terminal interrupt character to this pane's foreground job.
+    pub fn interrupt_pane(&mut self, leaf: u64, cx: &mut Context<Self>) {
+        let sent = self.sessions.get_mut(&leaf).is_some_and(|session| {
+            session.clear_selection();
+            session.scroll_to_bottom();
+            session.write(&[0x03]).is_ok()
+        });
+        if !sent { self.show_toast("Could not interrupt this terminal", cx); }
+        self.cursor_blink_on = true;
+        self.cursor_blink_epoch = std::time::Instant::now();
+        cx.notify();
+    }
+
+    /// Explicit fallback for an unresponsive local job. Kill only this pane's
+    /// process tree, then reopen its configured shell in the same folder.
+    pub fn force_stop_pane(&mut self, leaf: u64, cx: &mut Context<Self>) {
+        if self.session(leaf).is_some_and(|session| session.is_remote()) {
+            self.show_toast("Use force stop on the host terminal", cx);
+            return;
+        }
+        if self.tab_index_for_leaf(leaf).is_none() { return; }
+        self.teardown_leaf(leaf);
+        if let Some(state) = self.leaf_mut(leaf) { state.activity = Default::default(); }
+        self.spawn_session(leaf);
+        self.checkpoint_workspace();
+        self.show_toast("Process stopped; shell restarted", cx);
+    }
+
     /// True when the active terminal is scrolled back into its history.
     pub fn active_scrolled(&self) -> bool {
-        let leaf = self.active_tab().active_leaf;
+        let Some(leaf) = self.active_tab_checked().map(|tab| tab.active_leaf) else { return false; };
         self.sessions
             .get(&leaf)
             .is_some_and(|session| session.screen().scrollback() > 0)
@@ -820,7 +920,7 @@ impl SpritXApp {
 
     /// Copy the active terminal's selection to the clipboard (Ctrl+Shift+C).
     pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        let leaf = self.active_tab().active_leaf;
+        let Some(leaf) = self.active_tab_checked().map(|tab| tab.active_leaf) else { return; };
         let text = self
             .sessions
             .get(&leaf)
@@ -837,7 +937,7 @@ impl SpritXApp {
 
     /// Select the whole visible terminal screen (Ctrl+Shift+A).
     pub fn select_all_active(&mut self, cx: &mut Context<Self>) {
-        let leaf = self.active_tab().active_leaf;
+        let Some(leaf) = self.active_tab_checked().map(|tab| tab.active_leaf) else { return; };
         if let Some(session) = self.sessions.get_mut(&leaf) {
             session.select_all();
             cx.notify();
@@ -865,7 +965,7 @@ impl SpritXApp {
 
     /// Scroll the active terminal: positive `lines` moves toward the live view.
     pub fn scroll_active(&mut self, lines: isize, cx: &mut Context<Self>) {
-        let leaf = self.active_tab().active_leaf;
+        let Some(leaf) = self.active_tab_checked().map(|tab| tab.active_leaf) else { return; };
         if let Some(session) = self.sessions.get_mut(&leaf) {
             if session.scroll_lines(lines) {
                 cx.notify();
@@ -891,20 +991,71 @@ impl SpritXApp {
             .iter()
             .flat_map(|tab| tab.leaf_ids())
             .collect();
-        self.sessions.retain(|leaf, _| live.contains(leaf));
+        self.sessions.retain(|leaf, session| {
+            if !live.contains(leaf) { session.kill(); return false; }
+            true
+        });
         self.session_errors.retain(|leaf, _| live.contains(leaf));
+        self.block_trackers.retain(|leaf, _| live.contains(leaf));
+        self.owner_seen.retain(|leaf, _| live.contains(leaf));
+        self.owner_activation.retain(|leaf, _| live.contains(leaf));
+        self.command_started.retain(|leaf, _| live.contains(leaf));
+        self.restored_sessions.retain(|leaf, _| live.contains(leaf));
         // Dropping the last handle closes the link (see `RemoteLink::drop`), so
         // a removed pane cannot leave a reconnect loop behind.
         self.remote_links.retain(|leaf, _| live.contains(leaf));
         self.remote_link_notes.retain(|leaf, _| live.contains(leaf));
     }
 
+    /// Drop every per-pane entry for a single leaf, killing its session and
+    /// dropping its remote link (whose `Drop` tears the reconnect loop down).
+    /// Called immediately on close so no stale entry outlives the pane.
+    fn teardown_leaf(&mut self, leaf: u64) {
+        if let Some(mut session) = self.sessions.remove(&leaf) {
+            session.kill();
+        }
+        self.session_errors.remove(&leaf);
+        self.block_trackers.remove(&leaf);
+        self.owner_seen.remove(&leaf);
+        self.owner_activation.remove(&leaf);
+        self.command_started.remove(&leaf);
+        self.restored_sessions.remove(&leaf);
+        self.remote_links.remove(&leaf);
+        self.remote_link_notes.remove(&leaf);
+    }
+
+    /// Keep a valid active index, using zero for an empty workspace.
+    fn clamp_active_tab(&mut self) {
+        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+    }
+
+    /// Empty workspaces have no active tab.
+    pub fn active_tab_checked(&self) -> Option<&TabState> {
+        self.tabs.get(self.active_tab).or_else(|| self.tabs.first())
+    }
+
+    pub(super) fn active_tab_checked_mut(&mut self) -> Option<&mut TabState> {
+        self.clamp_active_tab();
+        let idx = self.active_tab;
+        if idx < self.tabs.len() {
+            self.tabs.get_mut(idx)
+        } else {
+            self.tabs.first_mut()
+        }
+    }
+
     pub fn active_tab(&self) -> &TabState {
-        &self.tabs[self.active_tab]
+        // Read path is total even if `active_tab` somehow went stale:
+        // fall back to the first tab rather than panicking the UI thread.
+        // Only use this accessor after checking that a tab exists.
+        debug_assert!(!self.tabs.is_empty(), "active_tab on an empty tab list");
+        self.active_tab_checked().expect("tabs is non-empty (see debug_assert)")
     }
 
     pub fn active_tab_mut(&mut self) -> &mut TabState {
-        &mut self.tabs[self.active_tab]
+        self.clamp_active_tab();
+        debug_assert!(!self.tabs.is_empty(), "active_tab_mut on an empty tab list");
+        self.active_tab_checked_mut().expect("tabs is non-empty (see debug_assert)")
     }
 
     pub fn show_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -917,19 +1068,28 @@ impl SpritXApp {
 
         // Toasts are transient by nature: without a timer one stays on screen
         // until something else replaces it. The generation is checked so a
-        // superseded toast's timer cannot clear the one now showing.
-        cx.spawn(async move |this, cx| {
+        // superseded toast's timer cannot clear the one now showing. The task
+        // is stored (replacing any previous one) so bursts do not accumulate
+        // detached timers — dropping the old Task cancels it.
+        self.toast_task = Some(cx.spawn(async move |this, cx| {
             gpui::Timer::after(TOAST_TTL).await;
             let _ = this.update(cx, |this, cx| {
                 if this.toast.as_ref().is_some_and(|toast| toast.generation == generation) {
                     this.toast = None;
+                    this.toast_task = None;
                     cx.notify();
                 }
             });
-        })
-        .detach();
+        }));
     }
 
+    /// Return keyboard focus to the terminal once an overlay that captured
+    /// it closes, instead of leaving focus on the dismissed popup. Only
+    /// needed when the caller has a `Window`; the render-time force-focus
+    /// below no longer steals focus while an overlay is open.
+    pub(super) fn refocus_terminal(&self, window: &mut Window) {
+        window.focus(&self.focus_handle);
+    }
     pub fn close_modal(&mut self) {
         crate::metrics::event("action.close_modal");
         self.modal = None;
@@ -941,10 +1101,15 @@ impl SpritXApp {
         self.settings_menu = None;
         self.settings_field = None;
         self.settings_buf.clear();
+        // Nothing above kept focus, but the caller re-notifies; the render
+        // pass refocuses the terminal once no overlay remains open.
     }
 
     pub fn close_top_overlay(&mut self) -> bool {
         crate::metrics::event("action.close_top_overlay");
+        if self.cli_launcher.dismiss_menu() {
+            return true;
+        }
         if self.tab_menu.is_some() {
             self.tab_menu = None;
             return true;
@@ -977,9 +1142,10 @@ impl SpritXApp {
         self.next_tab_id += 1;
         let leaf_id = self.next_leaf_id;
         self.next_leaf_id += 1;
-        self.tabs.push(TabState::single(tab_id, format!("Terminal {tab_id}"), leaf_id));
+        self.tabs.push(TabState::single(tab_id, "Terminal", leaf_id));
         self.active_tab = self.tabs.len() - 1;
         self.spawn_session(leaf_id);
+        self.touch_recent(leaf_id);
         cx.notify();
     }
 
@@ -988,24 +1154,37 @@ impl SpritXApp {
         if index < self.tabs.len() {
             self.active_tab = index;
             self.close_modal();
+            self.touch_recent(self.tabs[index].active_leaf);
             cx.notify();
         }
     }
 
     pub fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         crate::metrics::event(&format!("action.close_tab index={index}"));
-        if self.tabs.len() <= 1 {
-            self.show_toast("The last tab cannot be closed", cx);
-            return;
-        }
         if index < self.tabs.len() {
             let removed = self.tabs.remove(index);
             for leaf in removed.leaf_ids() {
-                self.sessions.remove(&leaf);
+                self.teardown_leaf(leaf);
             }
-            if self.active_tab >= self.tabs.len() {
+            // Removing shifts later tabs left, so an active tab after the
+            // removed slot would point at a neighbour without this.
+            if index < self.active_tab {
+                self.active_tab -= 1;
+            }
+            if !self.tabs.is_empty() && self.active_tab >= self.tabs.len() {
                 self.active_tab = self.tabs.len() - 1;
             }
+            // A rename in progress for the tab just closed must not keep
+            // editing (or committing to) a tab that no longer exists.
+            if self.editing_tab == Some(removed.id) {
+                self.editing_tab = None;
+                self.editing_title.clear();
+            }
+            self.clamp_active_tab();
+            self.tab_menu = None;
+            self.pane_menu = None;
+            self.refresh_remote_tabs();
+            self.checkpoint_workspace();
             cx.notify();
         }
     }
@@ -1214,6 +1393,7 @@ impl SpritXApp {
     pub fn apply_layout(&mut self, preset: &LayoutPreset, cx: &mut Context<Self>) {
         crate::metrics::event(&format!("action.apply_layout preset={}", preset.id));
         self.layouts_open = false;
+        if self.tabs.is_empty() { self.add_tab(cx); }
         let index = self.active_tab;
         let needed = match preset.id {
             "two-cols" | "two-rows" => 2,
@@ -1274,6 +1454,7 @@ impl SpritXApp {
         if let Some(index) = self.tab_index_for_leaf(leaf) {
             self.active_tab = index;
             self.tabs[index].active_leaf = leaf;
+            self.touch_recent(leaf);
             cx.notify();
         }
     }
@@ -1290,7 +1471,7 @@ impl SpritXApp {
             return;
         };
         if tab.pane_count() >= MAX_PANES_PER_TAB {
-            self.show_toast("A tab holds at most four panes", cx);
+            self.show_toast(format!("A tab holds at most {MAX_PANES_PER_TAB} panes"), cx);
             return;
         }
         let new_leaf = self.next_leaf_id;
@@ -1304,7 +1485,7 @@ impl SpritXApp {
 
     pub fn split_active_pane(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
         crate::metrics::event(&format!("action.split_active direction={direction:?}"));
-        let target = self.active_tab().active_leaf;
+        let Some(target) = self.active_tab_checked().map(|tab| tab.active_leaf) else { return; };
         self.split_leaf_in_tab(self.active_tab, target, direction, cx);
     }
 
@@ -1331,20 +1512,20 @@ impl SpritXApp {
             return;
         }
         if self.tabs[index].close_leaf(leaf) {
-            self.sessions.remove(&leaf);
+            self.teardown_leaf(leaf);
             cx.notify();
         }
     }
 
     pub fn set_split_ratio(&mut self, path: &[usize], ratio: f32) -> bool {
         let index = self.active_tab;
-        self.tabs[index].set_split_ratio(path, ratio)
+        self.tabs.get_mut(index).is_some_and(|tab| tab.set_split_ratio(path, ratio))
     }
 
     pub fn cycle_pane(&mut self, forward: bool, cx: &mut Context<Self>) {
         crate::metrics::event(&format!("action.cycle_pane forward={forward}"));
         let index = self.active_tab;
-        let current = self.tabs[index].active_leaf;
+        let Some(current) = self.tabs.get(index).map(|tab| tab.active_leaf) else { return; };
         if let Some(next) = self.tabs[index].neighbour_leaf(current, forward) {
             self.tabs[index].active_leaf = next;
             cx.notify();
@@ -1356,7 +1537,6 @@ impl SpritXApp {
         if let Some(tab) = self.tabs.get(index) {
             self.tab_menu = Some(TabMenuState {
                 tab_id: tab.id,
-                index,
                 x,
                 y,
             });
@@ -1364,6 +1544,13 @@ impl SpritXApp {
             self.editing_tab = None;
             cx.notify();
         }
+    }
+
+    /// Live position of a tab id. Closures capture the menu's `tab_id`, not a
+    /// positional index, so a tab closed left of the target cannot retarget
+    /// the action onto a neighbour.
+    pub fn tab_index_for_id(&self, id: TabId) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id == id)
     }
 
     pub fn begin_rename(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1420,7 +1607,17 @@ impl SpritXApp {
         cx.notify();
     }
 
-    fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn terminal_has_focus(&self) -> bool {
+        self.modal.is_none()
+            && self.editing_tab.is_none()
+            && self.settings_menu.is_none()
+            && self.tab_menu.is_none()
+            && self.pane_menu.is_none()
+            && !self.layouts_open
+            && !self.remote_menu_open
+    }
+
+    fn render_body(&self, window_active: bool, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
             .flex_1()
@@ -1446,7 +1643,7 @@ impl SpritXApp {
                     })
                     .bg(self.theme.bg)
                     .overflow_hidden()
-                    .child(crate::metrics::tab_bar(|| super::tab_bar::render(self, cx)))
+                    .child(crate::metrics::tab_bar(|| super::tab_bar::render(self, window_active, cx)))
                     .child(
                         div()
                             .flex()
@@ -1462,8 +1659,9 @@ impl SpritXApp {
     }
 
     fn render_status_hint(&self) -> AnyElement {
+        if self.tabs.is_empty() { return div().into_any_element(); }
         let theme = self.theme;
-        let leaf = self.active_tab().active_leaf_state();
+        let leaf = self.active_leaf();
         let (cwd, branch) = leaf
             .map(|l| (l.cwd.clone(), l.branch.clone()))
             .unwrap_or_default();
@@ -1515,10 +1713,10 @@ impl SpritXApp {
             overlays.push(super::overlays::render_modal(self, modal, cx));
         }
         if let Some(menu) = &self.tab_menu {
-            overlays.push(deferred(super::tab_bar::render_context_menu(self, menu, cx)).into_any_element());
+            overlays.push(deferred(super::tab_bar::render_context_menu(self, menu, cx)).with_priority(super::overlays::CONTEXT_MENU_Z).into_any_element());
         }
         if let Some(menu) = &self.pane_menu {
-            overlays.push(deferred(super::pane_tree::render_context_menu(self, menu, viewport, cx)).into_any_element());
+            overlays.push(deferred(super::pane_tree::render_context_menu(self, menu, viewport, cx)).with_priority(super::overlays::CONTEXT_MENU_Z).into_any_element());
         }
         if let Some(toast) = &self.toast {
             overlays.push(super::overlays::render_toast(self, &toast.message));
@@ -1532,7 +1730,10 @@ impl Render for SpritXApp {
         crate::metrics::input_painted();
         crate::metrics::frame_tick(false);
         crate::metrics::frame_start();
-        if !self.focus_handle.is_focused(window) {
+        // Only claim the terminal when nothing else owns the keyboard:
+        // forcing focus every frame steals it from modal/menu/editing
+        // fields. Once they close, this refocuses the terminal again.
+        if self.terminal_has_focus() && !self.focus_handle.contains_focused(window, cx) {
             window.focus(&self.focus_handle);
         }
         let theme = self.theme;
@@ -1603,7 +1804,7 @@ impl Render for SpritXApp {
                     }
                 }),
             )
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Latency probe: bytes still queued on the tty when this ran
                 // (big value = the event loop was blocked before dispatch).
                 if crate::metrics::enabled() {
@@ -1688,8 +1889,26 @@ impl Render for SpritXApp {
                     return;
                 }
                 if key == "escape" && this.close_top_overlay() {
+                    if this.terminal_has_focus() {
+                        this.refocus_terminal(window);
+                    }
                     cx.notify();
                     return;
+                }
+                // Interrupts are terminal controls, never clipboard actions.
+                // Keep them ahead of global shortcuts while a terminal owns focus.
+                if this.terminal_has_focus() && mods.control && !mods.alt && !mods.platform {
+                    let leaf = this.active_tab_checked().map(|tab| tab.active_leaf);
+                    if key.eq_ignore_ascii_case("c") && !mods.shift {
+                        if let Some(leaf) = leaf { this.interrupt_pane(leaf, cx); }
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if key.eq_ignore_ascii_case("k") && mods.shift {
+                        if let Some(leaf) = leaf { this.force_stop_pane(leaf, cx); }
+                        cx.stop_propagation();
+                        return;
+                    }
                 }
                 let cmd = mods.control || mods.platform;
                 // Terminal clipboard / zoom / scrollback shortcuts, matching
@@ -1760,49 +1979,63 @@ impl Render for SpritXApp {
                     cx.stop_propagation();
                     return;
                 }
-                if mods.alt && !cmd && matches!(key, "left" | "right" | "up" | "down") {
-                    match key {
-                        "left" | "up" => this.cycle_pane(false, cx),
-                        "right" | "down" => this.cycle_pane(true, cx),
-                        _ => {}
-                    }
-                } else if cmd && mods.shift && key == "p" {
-                    this.open_palette(PaletteMode::Command, cx);
-                } else if cmd && mods.shift && key == "h" {
-                    this.open_palette(PaletteMode::History, cx);
-                } else if cmd && mods.shift && key == "d" {
-                    this.split_active_pane(SplitDirection::Row, cx);
-                } else if cmd && mods.shift && key == "e" {
-                    this.split_active_pane(SplitDirection::Column, cx);
-                } else if cmd && key == "t" {
-                    this.add_tab(cx);
-                } else if cmd && key == "w" {
-                    let leaf = this.active_tab().active_leaf;
-                    this.close_pane(leaf, cx);
-                } else if cmd && (key == "," || key == "comma") {
-                    this.open_settings(cx);
-                } else if cmd && key == "tab" {
-                    this.switch_tab(if mods.shift { -1 } else { 1 }, cx);
-                } else if cmd && mods.shift && key == "]" {
-                    this.switch_tab(1, cx);
-                } else if cmd && mods.shift && key == "[" {
-                    this.switch_tab(-1, cx);
-                } else if cmd && !mods.shift {
-                    if let Some(digit) = key.chars().next().and_then(|c| c.to_digit(10)) {
-                        if digit >= 1 && digit <= 9 {
-                            this.activate_tab(digit as usize - 1, cx);
+                // Global shortcuts are inert while any overlay owns the
+                // keyboard: otherwise a Settings/CloseConfirm modal could
+                // be bypassed (Ctrl+W/T, Alt+arrows, Ctrl+digits acting
+                // underneath it). The palette path above already returned.
+                let overlays_clear = this.modal.is_none()
+                    && !this.layouts_open
+                    && !this.remote_menu_open
+                    && this.tab_menu.is_none()
+                    && this.pane_menu.is_none();
+                if overlays_clear {
+                    if mods.alt && !cmd && matches!(key, "left" | "right" | "up" | "down") {
+                        match key {
+                            "left" | "up" => this.cycle_pane(false, cx),
+                            "right" | "down" => this.cycle_pane(true, cx),
+                            _ => {}
                         }
-                    } else if this.modal.is_none() {
-                        // No local echo: the PTY reader wakes the view when the
-                        // shell echoes, so we don't force a repaint per key.
+                    } else if cmd && mods.shift && key == "p" {
+                        this.open_palette(PaletteMode::Command, cx);
+                    } else if cmd && mods.shift && key == "h" {
+                        this.open_palette(PaletteMode::History, cx);
+                    } else if cmd && mods.shift && key == "d" {
+                        this.split_active_pane(SplitDirection::Row, cx);
+                    } else if cmd && mods.shift && key == "e" {
+                        this.split_active_pane(SplitDirection::Column, cx);
+                    } else if cmd && key == "t" {
+                        this.add_tab(cx);
+                    } else if cmd && key == "w" {
+                        if let Some(leaf) = this.active_tab_checked().map(|tab| tab.active_leaf) { this.close_pane(leaf, cx); }
+                    } else if cmd && (key == "," || key == "comma") {
+                        this.open_settings(cx);
+                    } else if cmd && key == "tab" {
+                        this.switch_tab(if mods.shift { -1 } else { 1 }, cx);
+                    } else if cmd && mods.shift && key == "]" {
+                        this.switch_tab(1, cx);
+                    } else if cmd && mods.shift && key == "[" {
+                        this.switch_tab(-1, cx);
+                    } else if cmd && !mods.shift {
+                        if let Some(digit) = key.chars().next().and_then(|c| c.to_digit(10)) {
+                            if digit >= 1 && digit <= 9 {
+                                this.activate_tab(digit as usize - 1, cx);
+                            }
+                        } else if this.modal.is_none() {
+                            // No local echo: the PTY reader wakes the view when the
+                            // shell echoes, so we don't force a repaint per key.
+                            this.type_key(event, cx);
+                        }
+                    } else if this.modal.is_none() && this.editing_tab.is_none() {
                         this.type_key(event, cx);
                     }
-                } else if this.modal.is_none() && this.editing_tab.is_none() {
-                    this.type_key(event, cx);
                 }
-            }))
-            .child(self.render_body(cx))
-            .children(self.render_root_overlays(window.viewport_size(), cx));
+            }));
+        let window_active = window.is_window_active();
+        let viewport = window.bounds().size;
+        let mut root = root.child(self.render_body(window_active, cx));
+        for overlay in self.render_root_overlays(viewport, cx) {
+            root = root.child(overlay);
+        }
         crate::metrics::frame_end();
         root
     }
@@ -1840,7 +2073,7 @@ impl SpritXApp {
     }
 
     pub fn active_leaf(&self) -> Option<&LeafState> {
-        self.active_tab().active_leaf_state()
+        self.active_tab_checked().and_then(TabState::active_leaf_state)
     }
 
     pub fn palette_rows(&self) -> Vec<(Icon, SharedString, &'static str)> {
@@ -2014,6 +2247,11 @@ fn theme_index_for(theme: &crate::backend::config::ThemeConfig) -> usize {
 
 fn settings_from_config(config: &AppConfig) -> SettingsData {
     let mut settings = SettingsData::default();
+    settings.close_to_tray = config.behavior.close_to_tray;
+    settings.restore_workspace = config.behavior.restore_workspace;
+    settings.keep_sessions = config.behavior.keep_sessions;
+    settings.save_terminal_output = config.behavior.save_terminal_output;
+    settings.reduced_motion = config.behavior.reduced_motion;
     settings.font_family = config.appearance.font_family.clone();
     settings.font_size = config.appearance.font_size as f32;
     settings.cursor_blink = config.appearance.cursor_blink;
@@ -2054,6 +2292,11 @@ fn settings_from_config(config: &AppConfig) -> SettingsData {
 }
 
 fn apply_settings(config: &mut AppConfig, settings: &SettingsData) {
+    config.behavior.close_to_tray = settings.close_to_tray;
+    config.behavior.restore_workspace = settings.restore_workspace;
+    config.behavior.keep_sessions = settings.keep_sessions;
+    config.behavior.save_terminal_output = settings.save_terminal_output;
+    config.behavior.reduced_motion = settings.reduced_motion;
     config.appearance.font_family = settings.font_family.clone();
     config.appearance.font_size = settings.font_size.round().clamp(8.0, 40.0) as u16;
     config.appearance.cursor_blink = settings.cursor_blink;
@@ -2443,7 +2686,7 @@ impl SpritXApp {
         }
         self.remote_tab_signature = signature;
         let tabs = self.remote_tab_infos();
-        server.set_active_leaf(self.active_tab().active_leaf);
+        server.set_active_leaf(self.active_tab_checked().map(|tab| tab.active_leaf).unwrap_or(0));
         server.set_tabs(tabs);
     }
 
@@ -2457,7 +2700,7 @@ impl SpritXApp {
             hash ^= 0xff;
             hash = hash.wrapping_mul(1099511628211);
         };
-        mix(&self.active_tab().active_leaf.to_string());
+        mix(&self.active_tab_checked().map(|tab| tab.active_leaf).unwrap_or(0).to_string());
         for tab in &self.tabs {
             mix(&tab.title);
             for leaf in tab.leaf_ids() {
@@ -2483,11 +2726,11 @@ impl SpritXApp {
                     .get(&leaf)
                     .map(|state| state.cwd.clone())
                     .unwrap_or_default();
-                let title = pane_title(&cwd, &tab.title);
+                let title = pane_title(&cwd, tab.display_title());
                 out.push(TabInfo {
                     id: leaf,
                     title,
-                    tab: tab.title.clone(),
+                    tab: tab.display_title().to_string(),
                     tab_id: tab.id,
                     activity: tab.leaves.get(&leaf).map_or_else(Default::default, |state| state.activity),
                 });
@@ -2507,7 +2750,7 @@ impl SpritXApp {
         let mut repaint = false;
         for input in inputs {
             match input {
-                RemoteInput::Write { leaf, bytes } => {
+                RemoteInput::Write { leaf, bytes, .. } => {
                     if let Some(session) = self.sessions.get_mut(&leaf) {
                         session.clear_selection();
                         if session.scroll_to_bottom() {
@@ -2538,9 +2781,12 @@ impl SpritXApp {
                     let leaf_id = self.next_leaf_id;
                     self.next_leaf_id += 1;
                     self.tabs
-                        .push(TabState::single(tab_id, format!("Terminal {tab_id}"), leaf_id));
-                    self.active_tab = self.tabs.len() - 1;
+                        .push(TabState::single(tab_id, "Terminal", leaf_id));
+                    // A remote-requested tab must not steal the local user's
+                    // focus: leave `active_tab` alone so they keep working.
                     self.spawn_session(leaf_id);
+                    self.touch_recent(leaf_id);
+                    self.checkpoint_workspace();
                     // The new pane becomes this client's target, and every
                     // client still without a pane is repointed by `set_tabs`.
                     server.set_active_leaf(leaf_id);
@@ -2599,7 +2845,12 @@ fn truncate_url(url: &str) -> String {
     if url.len() <= 48 {
         return url.to_string();
     }
-    format!("{}…", &url[..47])
+    let prefix = url
+        .char_indices()
+        .nth(47)
+        .map(|(index, _)| &url[..index])
+        .unwrap_or(url);
+    format!("{prefix}…")
 }
 
 
@@ -2619,4 +2870,124 @@ fn missing_fonts_use_an_installed_monospace_family() {
     assert_eq!(resolve_terminal_font_family("JetBrains Mono, monospace", &available), "JetBrains Mono");
 }
 
+}
+/// Drive close-last/empty/recreate through the actual window and render loop.
+#[cfg(debug_assertions)]
+pub fn tab_lifecycle_test(window: gpui::WindowHandle<SpritXApp>, cx: &mut gpui::App) {
+    cx.spawn(async move |cx| {
+        window.update(cx, |app, _, cx| {
+            app.next_tab_id = 13;
+            app.add_tab(cx);
+            assert_eq!(app.active_tab().title, "Terminal");
+            app.close_tab(1, cx);
+            app.close_tab(0, cx);
+            assert!(app.tabs.is_empty());
+            assert!(app.sessions.is_empty());
+            assert!(app.active_leaf().is_none());
+            assert!(!app.write_active(b"ignored"));
+            assert!(!app.active_scrolled());
+            assert!(!app.set_split_ratio(&[], 0.5));
+            app.cycle_pane(true, cx);
+            app.split_active_pane(SplitDirection::Row, cx);
+            assert!(app.tabs.is_empty());
+            let saved = crate::backend::workspace::load();
+            assert!(saved.empty_workspace);
+            assert!(crate::backend::workspace::valid(&saved));
+            app.restore_workspace();
+            assert!(app.tabs.is_empty());
+            app.layouts_open = true;
+            cx.notify();
+        }).unwrap();
+        gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        window.update(cx, |app, _, cx| { app.open_settings(cx); }).unwrap();
+        gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        window.update(cx, |app, _, cx| {
+            app.close_modal();
+            app.add_tab(cx); // Same handler as the + button.
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.active_tab().display_title(), "Terminal");
+            assert_eq!(app.sessions.len(), 1);
+        }).unwrap();
+        gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        window.update(cx, |app, _, cx| {
+            app.close_tab(0, cx); // Same handler as the tab's × button.
+            app.close_tab(0, cx); // A stale/double close is harmless.
+            assert!(app.tabs.is_empty());
+            assert!(app.sessions.is_empty());
+        }).unwrap();
+        gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        cx.update(|cx| cx.quit()).unwrap();
+    }).detach();
+}
+#[cfg(debug_assertions)]
+pub fn process_control_test(window: gpui::WindowHandle<SpritXApp>, cx: &mut gpui::App) {
+    use gpui::AppContext;
+    cx.spawn(async move |cx| {
+        let root = std::path::PathBuf::from(std::env::var("SPRITX_PROCESS_ROOT").unwrap());
+        macro_rules! wait_until {
+            ($condition:expr, $message:expr) => {{
+                let mut ready = false;
+                for _ in 0..100 {
+                    gpui::Timer::after(std::time::Duration::from_millis(100)).await;
+                    if $condition { ready = true; break; }
+                }
+                assert!(ready, "{}", $message);
+            }};
+        }
+        wait_until!(window.update(cx, |app, _, _| {
+            app.pump_terminals();
+            app.session(app.active_tab().active_leaf).is_some_and(|session| session.powerline_prompt_end().is_some())
+        }).unwrap(), "initial shell did not become ready");
+        let (leaf, original_pid) = window.update(cx, |app, _, _| {
+            let leaf = app.active_tab().active_leaf;
+            assert!(app.session(leaf).unwrap().owner_connection().is_some());
+            assert!(app.send_to_terminal("node server.cjs", true));
+            (leaf, app.session(leaf).unwrap().pid())
+        }).unwrap();
+        wait_until!(std::fs::read_to_string(root.join("port.txt")).ok().and_then(|s| s.parse::<u16>().ok()).is_some(), "Node server did not start");
+        let port: u16 = std::fs::read_to_string(root.join("port.txt")).unwrap().parse().unwrap();
+        // Dispatch through the window's real key listeners, not directly to the PTY.
+        cx.update_window(window.into(), |_, window, cx| {
+            assert!(window.dispatch_keystroke(gpui::Keystroke {
+                modifiers: gpui::Modifiers::control(), key: "c".into(), key_char: None,
+            }, cx));
+        }).unwrap();
+        wait_until!(root.join("signal.txt").exists() && std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "keyboard Ctrl+C did not deliver SIGINT/release the port");
+        wait_until!(window.update(cx, |app, _, _| {
+            app.pump_terminals();
+            app.session(leaf).is_some_and(|session| session.powerline_prompt_end().is_some() && session.cursor().1 == 2)
+        }).unwrap(), "shell did not return after Ctrl+C");
+        let (other_leaf, other_pid) = window.update(cx, |app, _, cx| {
+            assert_eq!(app.session(leaf).unwrap().pid(), original_pid);
+            app.add_tab(cx);
+            let other = app.active_tab().active_leaf;
+            let other_pid = app.session(other).unwrap().pid();
+            app.focus_leaf(leaf, cx);
+            assert!(app.send_to_terminal("node force-server.cjs", true));
+            (other, other_pid)
+        }).unwrap();
+        wait_until!(std::fs::read_to_string(root.join("force-port.txt")).ok().and_then(|s| s.parse::<u16>().ok()).is_some(), "unresponsive test server did not start");
+        let force_port: u16 = std::fs::read_to_string(root.join("force-port.txt")).unwrap().parse().unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke {
+                modifiers: gpui::Modifiers::control(), key: "c".into(), key_char: None,
+            }, cx);
+        }).unwrap();
+        wait_until!(root.join("ignored.txt").exists(), "test server did not observe Ctrl+C");
+        assert!(std::net::TcpStream::connect(("127.0.0.1", force_port)).is_ok());
+        cx.update_window(window.into(), |_, window, cx| {
+            assert!(window.dispatch_keystroke(gpui::Keystroke {
+                modifiers: gpui::Modifiers { control: true, shift: true, ..Default::default() },
+                key: "k".into(), key_char: None,
+            }, cx));
+        }).unwrap();
+        wait_until!(std::net::TcpStream::connect(("127.0.0.1", force_port)).is_err(), "force stop left the server running");
+        window.update(cx, |app, _, cx| {
+            assert_ne!(app.session(leaf).unwrap().pid(), original_pid);
+            assert_eq!(app.session(other_leaf).unwrap().pid(), other_pid, "force stop affected another pane");
+            assert!(app.session(other_leaf).unwrap().exit_code().is_none());
+            assert_eq!(app.tabs.len(), 2);
+            app.quit_desktop(cx);
+        }).unwrap();
+    }).detach();
 }

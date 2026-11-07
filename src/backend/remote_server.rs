@@ -15,19 +15,11 @@
 //! one background thread and exchanges small values with the GPUI thread through
 //! mutexes and channels that live in that shared state:
 //!
-//! * **output** — `SpritXApp::pump_terminals` already drains each session's PTY
-//!   mailbox ([`pump_bytes`](crate::terminal::TerminalSession::pump_bytes)), so the GPUI thread hands the very
-//!   same bytes to [`RemoteServer::ingest`], which fans them out (clone per
-//!   connection) to the bridges watching that leaf and appends them to a
-//!   bounded replay tail. Both consumers see every byte exactly once; the UI's
-//!   `vt100` parser is untouched. A client that attaches, or switches pane, is
-//!   rebuilt from that raw tail — so its first paint keeps the colours,
-//!   attributes and alternate-screen state the desktop is showing. That tail is
-//!   *bounded*, so it is deliberately not the only source of truth: the modes a
-//!   child sets once (mouse reporting above all) are published per pane
-//!   ([`RemoteServer::set_modes`]) and put back in front of the tail, because a
-//!   page that reset its terminal cannot find a long-running fullscreen TUI's
-//!   `?1000h` in it and would otherwise leave every tap and swipe dead.
+//! * **output** — the UI publishes live PTY deltas and the parsed screen through
+//!   [`RemoteServer::ingest_screen`]. Connected clients receive deltas; a late
+//!   attach or pane switch receives a complete styled cell snapshot and input
+//!   modes. Snapshot capture and subscriber changes share the ingest lock, and
+//!   queued deltas carry the pane generation to prevent stale-pane output.
 //! * **input / resize / tab switch** — pushed onto a queue the GPUI thread
 //!   drains every pump tick ([`RemoteServer::take_inputs`]).
 //! * **completion** — replies are sealed by the bridge's own writer task, which
@@ -82,7 +74,7 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
 
 use crate::backend::remote::{
     ClientFrame, Control, Device, DeviceStore, Established, Half, ServerFrame, ServerHandshake,
@@ -99,6 +91,20 @@ pub const DEFAULT_REPLAY_BYTES: usize = 64 * 1024;
 /// Frames queued for one client before its bridge is cut: a client that cannot
 /// keep up must not be able to grow the queue without bound.
 pub const OUTBOX_CAPACITY: usize = 256;
+/// Cap on concurrent `/ws` connections, including unauthenticated handshakes
+/// that may sit open for the whole handshake timeout. Without it, a LAN peer
+/// can exhaust tasks, sockets and memory by opening connections it never
+/// completes — a cheap denial of service against a server bound to `0.0.0.0`.
+/// Excess upgrades are rejected with `503` instead of being queued.
+pub const MAX_CONNECTIONS: usize = 16;
+/// Bound on one WebSocket frame/message before auth. Axum 0.8 defaults to
+/// 16 MiB frames / 64 MiB messages, and `next_json`/`next_binary` buffer whole
+/// frames, so an unauthenticated LAN peer could force a multi-MiB allocation
+/// per socket. The protocol's largest legitimate frame is a 64 KiB replay
+/// chunk (`DEFAULT_REPLAY_BYTES`), so 4x that is ample margin for handshake
+/// JSON, sealed input frames and control frames. Axum/tungstenite closes the
+/// connection with a protocol error when a peer exceeds the limit.
+pub const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024;
 /// `u64::MAX` — "no pane shared yet".
 const NO_LEAF: u64 = u64::MAX;
 
@@ -168,8 +174,17 @@ impl Default for ServerOptions {
 /// these to its own sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteInput {
-    /// Raw keystrokes for `leaf`'s pane.
-    Write { leaf: u64, bytes: Vec<u8> },
+    /// Raw keystrokes for `leaf`'s pane. `conn`/`generation` identify the
+    /// connection and target generation at receipt time: a `SwitchTab` in
+    /// flight may repoint the connection before the GPUI pump drains the
+    /// queue, so the pump must drop writes whose generation no longer matches
+    /// the connection's current target (see `ServerState::conn_target_gen`).
+    Write {
+        conn: u64,
+        leaf: u64,
+        generation: u64,
+        bytes: Vec<u8>,
+    },
     Resize { leaf: u64, cols: u16, rows: u16 },
     /// Ask the desktop for a fresh tab, then point this connection at it.
     NewTab { conn: u64 },
@@ -232,7 +247,7 @@ struct ConnSlot {
 }
 
 enum OutMsg {
-    Output(Vec<u8>),
+    Output { leaf: u64, generation: u64, bytes: Vec<u8> },
     /// JSON [`Control`] text, sealed as a `T` frame by the writer task.
     Control(String),
 }
@@ -247,10 +262,14 @@ struct TabsState {
 
 /// What one connection is told: the shared panes and the pane it drives. It is
 /// a single value so a client never sees a half-updated (torn) view.
+/// `generation` is a per-connection monotonically increasing counter bumped on
+/// every target change, so a queued `Write` can be checked for staleness by
+/// the GPUI pump even after the pane id happens to repeat.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConnView {
     items: Vec<TabInfo>,
     active: Option<u64>,
+    generation: u64,
 }
 
 /// Mutable server lifecycle state, guarded by one fast mutex.
@@ -297,7 +316,7 @@ pub struct ServerState {
     active_leaf: AtomicU64,
     tabs: Mutex<TabsState>,
     /// Recent output per leaf, replayed to a client when it attaches.
-    replay: Mutex<HashMap<u64, Vec<u8>>>,
+    replay: Mutex<HashMap<u64, vt100::Parser>>,
     /// The terminal modes each leaf's session is in — mouse reporting,
     /// alternate screen, bracketed paste, application keys. They live in the
     /// desktop's parsed `vt100` screen and a client cannot recover them from
@@ -309,6 +328,9 @@ pub struct ServerState {
     public_base: Mutex<Option<String>>,
     last_error: Mutex<Option<String>>,
     status_cache: Mutex<Option<(Instant, RemoteStatus)>>,
+    /// Bounds concurrent `/ws` upgrades (see [`MAX_CONNECTIONS`]); one permit
+    /// per live bridge, released when its task ends.
+    conn_permits: Arc<Semaphore>,
 }
 
 /// Cheap, cloneable handle used from the GPUI thread.
@@ -357,6 +379,7 @@ impl RemoteServer {
             public_base: Mutex::new(None),
             last_error: Mutex::new(None),
             status_cache: Mutex::new(None),
+            conn_permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         });
 
         let (kill_tx, _) = broadcast::channel::<()>(1);
@@ -500,6 +523,9 @@ impl RemoteServer {
             .lock()
             .expect("modes lock")
             .retain(|id, _| tabs.iter().any(|tab| tab.id == *id));
+        // Keep fallback snapshots and target changes atomic with ingest.
+        let mut replay = self.state.replay.lock().expect("replay lock");
+        replay.retain(|id, _| tabs.iter().any(|tab| tab.id == *id));
         // Every live connection gets the list and, if its pane is gone, a new
         // target — as one write, so no client can observe a torn view.
         let mut conns = self.state.conns.lock().expect("conns lock");
@@ -510,9 +536,23 @@ impl RemoteServer {
             } else {
                 active.or(tabs.first().map(|tab| tab.id))
             };
+            let previous_view = slot.view.borrow().clone();
+            // WHY: a target change must invalidate writes the client queued
+            // for the pane it just left, even if the pane id later repeats.
+            let generation = if chosen != previous {
+                previous_view.generation + 1
+            } else {
+                previous_view.generation
+            };
+            if chosen != previous {
+                if let Ok(mut pending) = slot.pending_replay.lock() {
+                    *pending = chosen.map(|leaf| self.state.replay_for(&replay, leaf)).filter(|bytes| !bytes.is_empty()).unwrap_or_else(|| b"\x1bc".to_vec());
+                }
+            }
             slot.view.send_replace(ConnView {
                 items: tabs.clone(),
                 active: chosen,
+                generation,
             });
         }
         self.state.invalidate_status();
@@ -547,18 +587,26 @@ impl RemoteServer {
     /// Forward one PTY output chunk for `leaf` to every bridge watching it and
     /// remember it for late-attaching clients. Cheap: called from the UI pump.
     pub fn ingest(&self, leaf: u64, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
+        self.ingest_screen(leaf, bytes, None);
+    }
+
+    /// Publish the authoritative grid together with its delta. Reconnects must
+    /// not rebuild a screen from an arbitrarily truncated ANSI byte stream.
+    pub fn ingest_screen(&self, leaf: u64, bytes: &[u8], screen: Option<&vt100::Screen>) {
+        if bytes.is_empty() { return; }
         let _mem = crate::memprof::scope(crate::memprof::Region::Remote);
-        let limit = self.state.options.replay_bytes;
-        if limit > 0 {
-            let mut replay = self.state.replay.lock().expect("replay lock");
-            let tail = replay.entry(leaf).or_default();
-            tail.extend_from_slice(bytes);
-            if tail.len() > limit {
-                let drop = tail.len() - limit;
-                tail.drain(..drop);
+        let mut replay = self.state.replay.lock().expect("replay lock");
+        if self.state.options.replay_bytes > 0 {
+            if let Some(screen) = screen {
+                let (rows, cols) = screen.size();
+                let mut parser = vt100::Parser::new(rows, cols, 0);
+                if screen.alternate_screen() { parser.process(b"\x1b[?1049h"); }
+                parser.process(screen.state_formatted().as_bytes());
+                replay.insert(leaf, parser);
+            } else {
+                let parser = replay.entry(leaf).or_insert_with(|| vt100::Parser::new(
+                    std::num::NonZeroU16::new(24).unwrap(), std::num::NonZeroU16::new(80).unwrap(), 0));
+                parser.process(bytes);
             }
         }
         let mut conns = self.state.conns.lock().expect("conns lock");
@@ -567,7 +615,8 @@ impl RemoteServer {
             if slot.view.borrow().active != Some(leaf) {
                 continue;
             }
-            match slot.out.try_send(OutMsg::Output(bytes.to_vec())) {
+            let generation = slot.view.borrow().generation;
+            match slot.out.try_send(OutMsg::Output { leaf, generation, bytes: bytes.to_vec() }) {
                 // A closed bridge task needs no cleanup here: the bridge itself
                 // deregisters.
                 Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
@@ -592,13 +641,31 @@ impl RemoteServer {
         }
     }
 
-    /// Drain what remote clients asked the desktop to do.
+    /// Drain what remote clients asked the desktop to do. Writes whose
+    /// target generation is stale (a `SwitchTab` repointed their connection
+    /// after they were queued) are dropped here so they can never be applied
+    /// to the pane the client just left.
     pub fn take_inputs(&self) -> Vec<RemoteInput> {
         let mut guard = match self.state.inputs.lock() {
             Ok(guard) => guard,
             Err(_) => return Vec::new(),
         };
-        std::mem::take(&mut *guard)
+        let queued = std::mem::take(&mut *guard);
+        drop(guard);
+        queued
+            .into_iter()
+            .filter(|input| match input {
+                RemoteInput::Write {
+                    conn,
+                    leaf,
+                    generation,
+                    ..
+                } => self.state.conn_target_gen(*conn).is_some_and(|(current_leaf, current_gen)| {
+                    current_leaf == *leaf && current_gen == *generation
+                }),
+                _ => true,
+            })
+            .collect()
     }
 
     /// Open a fresh single-use pairing code and return its QR URL.
@@ -981,7 +1048,18 @@ async fn ws_handler(
                 .any(|marker| agent.contains(marker))
         });
     match weak.0.upgrade() {
-        Some(state) => ws.on_upgrade(move |socket| bridge(socket, state, mobile)),
+        Some(state) => {
+            // Refuse (do not queue) once the cap is hit: connections can sit
+            // unauthenticated for the whole handshake timeout, so queueing
+            // them would let a peer grow memory/sockets without bound.
+            match state.conn_permits.clone().try_acquire_owned() {
+                    Ok(permit) => ws
+                        .max_message_size(MAX_WS_MESSAGE_BYTES)
+                        .max_frame_size(MAX_WS_MESSAGE_BYTES)
+                        .on_upgrade(move |socket| bridge(socket, state, mobile, permit)),
+                Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            }
+        }
         None => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
@@ -1076,8 +1154,10 @@ impl Drop for ClientGuard<'_> {
     }
 }
 
-/// Run one client: handshake, then bridge its pane.
-async fn bridge(socket: WebSocket, state: Arc<ServerState>, mobile: bool) {
+/// Run one client: handshake, then bridge its pane. `_permit` is held for the
+/// whole bridge so the slot in [`MAX_CONNECTIONS`] is freed only when this
+/// task ends (including handshake timeout/failure, via the early returns).
+async fn bridge(socket: WebSocket, state: Arc<ServerState>, mobile: bool, _permit: OwnedSemaphorePermit) {
     let (mut sink, mut stream) = socket.split();
     let mut global_kill = state.runtime_kill();
     let session = {
@@ -1099,25 +1179,18 @@ async fn bridge(socket: WebSocket, state: Arc<ServerState>, mobile: bool) {
     let view = state.initial_view();
     let target = view.active;
     let (view_tx, view_rx) = watch::channel(view);
-    let pending_replay = Arc::new(Mutex::new(Vec::new()));
-    state.conns.lock().expect("conns lock").insert(
-        conn_id,
-        ConnSlot {
-            device_id: session.device_id.clone(),
-            mobile,
-            view: view_tx,
-            kill: kill_tx.clone(),
-            out: out_tx.clone(),
-            pending_replay: Arc::clone(&pending_replay),
-        },
-    );
-    signal_remote_wake();
-    // Rebuild this client's screen from the pane's own history so it does not
-    // start from a blank terminal. The tail is already buffered here, so no
-    // round trip to the GPUI thread is needed.
-    if let Some(leaf) = target {
-        state.queue_replay(conn_id, leaf);
+    let pending_replay;
+    {
+        // Snapshot and subscriber registration share the ingest lock: no delta
+        // can fall between them or be included in both snapshot and live output.
+        let replay = state.replay.lock().expect("replay lock");
+        pending_replay = Arc::new(Mutex::new(target.map(|leaf| state.replay_for(&replay, leaf)).unwrap_or_default()));
+        state.conns.lock().expect("conns lock").insert(conn_id, ConnSlot {
+            device_id: session.device_id.clone(), mobile, view: view_tx,
+            kill: kill_tx.clone(), out: out_tx.clone(), pending_replay: pending_replay.clone(),
+        });
     }
+    signal_remote_wake();
 
     let mut writer = tokio::spawn(output_task(
         sink,
@@ -1211,8 +1284,17 @@ async fn output_frames(
         tokio::select! {
             msg = out_rx.recv() => {
                 let Some(msg) = msg else { break };
+                if view_rx.has_changed().unwrap_or(false) {
+                    let view = view_rx.borrow_and_update().clone();
+                    if !announce(&mut sink, &mut tx, view, &mut announced).await { break; }
+                    if !drain_replay!() { break; }
+                }
                 let frame = match msg {
-                    OutMsg::Output(bytes) => ServerFrame::Output(bytes),
+                    OutMsg::Output { leaf, generation, bytes } => {
+                        let current = view_rx.borrow().clone();
+                        if current.active != Some(leaf) || current.generation != generation { continue; }
+                        ServerFrame::Output(bytes)
+                    },
                     OutMsg::Control(json) => match Control::from_json(&json) {
                         Some(control) => ServerFrame::Control(control),
                         None => continue,
@@ -1275,8 +1357,13 @@ async fn input_task(
         };
         match frame {
             ClientFrame::Input(bytes) => {
-                if let Some(leaf) = state.conn_target(conn_id) {
-                    state.push_input(RemoteInput::Write { leaf, bytes });
+                if let Some((leaf, generation)) = state.conn_target_gen(conn_id) {
+                    state.push_input(RemoteInput::Write {
+                        conn: conn_id,
+                        leaf,
+                        generation,
+                        bytes,
+                    });
                 }
             }
             ClientFrame::Resize { cols, rows } => {
@@ -1332,6 +1419,7 @@ impl ServerState {
         ConnView {
             items: tabs.items.clone(),
             active: active.filter(|id| tabs.items.iter().any(|tab| &tab.id == id)),
+            generation: 0,
         }
     }
 
@@ -1343,48 +1431,34 @@ impl ServerState {
         active
     }
 
-    /// Everything a client needs to rebuild `leaf`'s screen: the modes the
-    /// child's own history can no longer supply, then that history.
-    ///
-    /// The history is a bounded tail and a child sets its modes once, so they
-    /// are usually not in it. Putting them back at the head of the stream is
-    /// what makes the client's terminal the one the child is talking to at all
-    /// (see [`RemoteServer::set_modes`]).
-    fn replay_for(&self, leaf: u64) -> Vec<u8> {
-        let tail = self
-            .replay
-            .lock()
-            .expect("replay lock")
-            .get(&leaf)
-            .cloned()
-            .unwrap_or_default();
+    /// The pane this connection currently drives, plus its target generation.
+    /// The GPUI pump compares a queued `Write`'s generation against this and
+    /// drops the write when a `SwitchTab` repointed the connection after the
+    /// write was queued, so a keystroke cannot land in the pane the client
+    /// just left.
+    pub fn conn_target_gen(&self, conn_id: u64) -> Option<(u64, u64)> {
+        let conns = self.conns.lock().ok()?;
+        let slot = conns.get(&conn_id)?;
+        let view = slot.view.borrow().clone();
+        view.active.map(|leaf| (leaf, view.generation))
+    }
+
+    /// Rebuild the current styled cell grid and its input modes, starting from
+    /// a reset screen. No incomplete ANSI/UTF-8 tail is replayed.
+    fn replay_for(&self, replay: &HashMap<u64, vt100::Parser>, leaf: u64) -> Vec<u8> {
+        let snapshot = replay.get(&leaf)
+            .map(|parser| (parser.screen().alternate_screen(), parser.screen().state_formatted()));
         let modes = self
             .modes
             .lock()
             .ok()
             .and_then(|modes| modes.get(&leaf).copied());
-        let mut out = modes.map(|modes| modes.restore_sequence()).unwrap_or_default();
-        out.extend_from_slice(&tail);
+        let Some((alternate, snapshot)) = snapshot else { return Vec::new(); };
+        let mut out = b"\x1bc".to_vec();
+        if let Some(modes) = modes { out.extend(modes.restore_sequence()); }
+        else if alternate { out.extend_from_slice(b"\x1b[?1049h"); }
+        out.extend_from_slice(snapshot.as_bytes());
         out
-    }
-
-    /// Queue `leaf`'s raw history to rebuild `conn`'s screen on its next view
-    /// announcement. Riding the announcement rather than the outbox keeps the
-    /// client told about its pane *before* it is fed that pane's history.
-    ///
-    /// The tail is the *raw* PTY byte stream, so it carries colours, attributes
-    /// and alternate-screen state. Dumping the parsed cell grid as plain text
-    /// instead — what this used to do via the desktop — threw all of that away
-    /// and left a freshly attached client painting an unstyled screen until the
-    /// next command produced output.
-    fn queue_replay(&self, conn: u64, leaf: u64) {
-        let replay = self.replay_for(leaf);
-        let conns = self.conns.lock().expect("conns lock");
-        if let Some(slot) = conns.get(&conn) {
-            if let Ok(mut pending) = slot.pending_replay.lock() {
-                *pending = replay;
-            }
-        }
     }
 
     /// Repoint one connection at a shared pane, and rebuild its screen from that
@@ -1393,7 +1467,9 @@ impl ServerState {
     fn switch_target(&self, conn_id: u64, leaf: u64) {
         // Take the replay lock first: `ingest` locks replay before conns, and
         // the opposite order here would deadlock against it.
-        let replay = self.replay_for(leaf);
+        let replay_guard = self.replay.lock().expect("replay lock");
+        let mut replay = self.replay_for(&replay_guard, leaf);
+        if replay.is_empty() { replay.extend_from_slice(b"\x1bc"); }
         let mut conns = match self.conns.lock() {
             Ok(conns) => conns,
             Err(_) => return,
@@ -1410,6 +1486,7 @@ impl ServerState {
         }
         slot.view.send_replace(ConnView {
             active: Some(leaf),
+            generation: view.generation + 1,
             ..view
         });
     }
@@ -1663,6 +1740,32 @@ pub fn listing_json(cwd: Option<&str>, token: &str) -> String {
     serde_json::json!({ "t": "ls", "items": items }).to_string()
 }
 
+/// Whether canonicalized `candidate` equals or is a descendant of canonicalized
+/// `root`. On Windows the comparison is case-insensitive, because the file
+/// system there is (and `C:\` vs `c:\` must not bypass the check); elsewhere
+/// paths are case-sensitive.
+fn path_is_within(candidate: &std::path::Path, root: &std::path::Path) -> bool {
+    let mut candidate = candidate.components();
+    let mut root = root.components();
+    loop {
+        match (root.next(), candidate.next()) {
+            (None, _) => return true,
+            (Some(expected), Some(actual)) => {
+                #[cfg(windows)]
+                let same = expected.as_os_str().to_string_lossy().eq_ignore_ascii_case(
+                    &actual.as_os_str().to_string_lossy(),
+                );
+                #[cfg(not(windows))]
+                let same = expected == actual;
+                if !same {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+        }
+    }
+}
+
 fn list_entries(cwd: Option<&str>, token: &str) -> Vec<(String, bool)> {
     let cwd = match cwd {
         Some(dir) if !dir.is_empty() => dir,
@@ -1686,7 +1789,21 @@ fn list_entries(cwd: Option<&str>, token: &str) -> Vec<(String, bool)> {
             std::path::Path::new(cwd).join(path)
         }
     };
-    let Ok(entries) = std::fs::read_dir(&dir_path) else {
+    // The token is client-controlled, so an absolute or `..`-laden directory
+    // must not escape the pane's cwd: canonicalize both sides (resolving
+    // `.`/`..` and symlinks) and fail closed unless the candidate is the
+    // canonical cwd or inside it. A missing/unreadable dir cannot be
+    // canonicalized, so it is rejected rather than listed.
+    let Ok(cwd_root) = std::fs::canonicalize(cwd) else {
+        return Vec::new();
+    };
+    let Ok(dir_real) = std::fs::canonicalize(&dir_path) else {
+        return Vec::new();
+    };
+    if !path_is_within(&dir_real, &cwd_root) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&dir_real) else {
         return Vec::new();
     };
     let show_hidden = prefix.starts_with('.');

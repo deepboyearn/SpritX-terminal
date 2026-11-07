@@ -4,6 +4,29 @@ use std::path::PathBuf;
 mod powershell;
 pub use powershell::POWERSHELL_INIT;
 
+pub fn command_completed(
+    project: &str, command: &str, exit_code: i32, duration: std::time::Duration,
+    activate: impl Fn() + Send + 'static,
+) {
+    let prefs = crate::backend::config::AppConfig::load().notifications;
+    if std::env::var_os("SPRITX_SMOKE").is_some() { return; }
+    if prefs.sound { play_completion_sound(); }
+    if !prefs.enabled || duration.as_secs() < u64::from(prefs.min_duration_sec) { return; }
+    let name = std::path::Path::new(project).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "Terminal".into());
+    let command = command.to_string();
+    std::thread::spawn(move || {
+        let body = if exit_code == 0 { format!("{name} · {command} completed") } else { format!("{name} · {command} finished with exit code {exit_code}") };
+        if let Ok(handle) = notify_rust::Notification::new()
+            .appname("SpritX").summary("SpritX · Command finished").body(&body)
+            .action("default", "Open terminal").timeout(10000).show()
+        {
+            let _ = handle.wait_for_action(|action| {
+                if action == "default" { activate(); }
+            });
+        }
+    });
+}
+
 pub fn play_completion_sound() {
     #[cfg(windows)]
     {
@@ -16,11 +39,9 @@ pub fn play_completion_sound() {
     }
     #[cfg(target_os = "linux")]
     std::thread::spawn(|| {
-        let _ = notify_rust::Notification::new()
-            .summary("SpritX Terminal")
-            .body("Terminal command finished")
-            .sound_name("complete")
-            .show();
+        let _ = std::process::Command::new("canberra-gtk-play")
+            .args(["--id", "complete"]).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).status();
     });
 }
 

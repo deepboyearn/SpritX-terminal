@@ -60,6 +60,17 @@ impl Theme {
             danger_soft: rgb(0x9f1239).into(),
             success: rgb(0x16a34a).into(),
             warning: rgb(0xb45309).into(),
+            // WHY these three are pinned explicitly instead of inherited
+            // from dark(): `on_accent` fills the accent buttons — the light
+            // accent (#405eb0) is dark, so white text (kept, but stated)
+            // keeps contrast; `black_40`/`black_50` are modal scrims
+            // (screens/overlays.rs `.bg(theme.black_40)`), and a black
+            // scrim is still the correct dimming layer over a light
+            // surface. Stating them here stops a future dark() edit from
+            // silently shifting the light theme's fills and scrims.
+            on_accent: rgb(0xffffff).into(),
+            black_40: rgba(0x00000066).into(),
+            black_50: rgba(0x00000080).into(),
             white_04: rgba(0x0000000a).into(),
             white_06: rgba(0x0000000f).into(),
             white_08: rgba(0x00000014).into(),

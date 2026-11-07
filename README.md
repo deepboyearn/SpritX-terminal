@@ -29,7 +29,10 @@ encrypted link.
 **Workspace**
 
 - File tree beside the terminal: directory listing command configurable, git
-  branch and dirty state in the header, and context-menu actions
+  branch and dirty state in the header, per-row git status badges
+  (modified/added/deleted/untracked, respecting nested-repo boundaries),
+  live refresh by bounded background polling (~1 s for a create/delete in
+  the tree; no filesystem watcher), and context-menu actions
   (list / open / view / edit) driven by command templates.
 - Command history in `~/.config/spritx/history.jsonl`, searchable from the
   command palette with filters such as `failed`, `ok`, `here`, `cwd:`,
@@ -245,7 +248,8 @@ src/state.rs         panes, tabs, settings, palette state
 src/metrics.rs       optional latency profiler
 src/screens/         app_shell (window, actions, terminal pump), pane_tree,
                      tab_bar, file_tree, overlays
-src/components/      icons, buttons, toggles, text input, dropdowns, menus
+src/components/      icons, buttons, toggles, text input (4,096-char cap),
+                     context menus
 src/backend/
   remote_server.rs   HTTP/WebSocket server, pairing, sealed frames, replay
   remote.rs          handshake, device store, protocol types
@@ -253,12 +257,35 @@ src/backend/
   osc.rs             OSC 7 / 133 / 7733 parsing (cwd, blocks, aliases)
   history.rs         command history store and search
   config.rs          config load/save/export
-  git.rs, files.rs   branch information, file-tree helpers
+  git.rs, files.rs   branch information, per-path git statuses, file-tree helpers
 ```
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Stopping running commands
+
+| Control | Behavior |
+| --- | --- |
+| `Ctrl+C` or right-click → Interrupt process | Interrupt the foreground job, including `npm run dev`, `bun run dev`, and Node servers. The shell remains open. |
+| `Ctrl+Shift+K` or right-click → Force stop & restart | Stop the active local terminal's process tree and restart its shell in the same folder. Other panes are unaffected. This resets that terminal's live screen. |
+| `Ctrl+Shift+C` | Copy selected text. |
+| `Ctrl+D` | Send EOF where the shell/program supports it. |
+| `Ctrl+Z` on Linux | Suspend the foreground job; `fg` resumes it. This does not terminate it. |
+| `Ctrl+\` on Linux | Send the terminal quit character (`SIGQUIT`). |
+| `Ctrl+Z`, then Enter on Windows | EOF for console readers that support the Windows convention. |
+
+Programs may handle or ignore interrupts; force stop is an explicit fallback.
+No runtime-specific kill command is substituted into your input. Normal shell
+commands such as `kill -TERM <PID>` (Linux), `Stop-Process -Id <PID>` (PowerShell),
+and `taskkill /PID <PID> /T /F` (Windows) remain available.
+
+References: [Node signal events](https://nodejs.org/api/process.html#signal-events),
+[Bun Ctrl+C](https://bun.sh/guides/process/ctrl-c),
+[Bash signals](https://www.gnu.org/s/bash/manual/html_node/Signals.html),
+[Windows console signals](https://learn.microsoft.com/en-us/windows/console/ctrl-c-and-ctrl-break-signals),
+[taskkill](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/taskkill).
 
 ### SpritX Pastel appearance
 

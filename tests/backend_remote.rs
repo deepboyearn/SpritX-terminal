@@ -211,7 +211,7 @@ fn pairing_is_single_use_and_expires() {
     let store = temp_store("pairing");
     let mut server = ServerHandshake::new(store, "srv", "host");
     let pairing = server.open_pairing();
-    assert_eq!(pairing.expires_in().as_secs() > 9 * 60, true);
+    assert!(pairing.expires_in().as_secs() > 9 * 60, "pairing must live ~10 min");
     assert!(pairing.fragment().starts_with("#p="));
     assert!(pairing.url("http://127.0.0.1:4530/").contains("/#p="));
 

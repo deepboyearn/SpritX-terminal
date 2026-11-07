@@ -11,3 +11,5 @@ pub mod osc;
 pub mod remote;
 pub mod remote_client;
 pub mod remote_server;
+pub mod workspace;
+pub mod session_owner;

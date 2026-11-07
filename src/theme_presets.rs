@@ -45,8 +45,34 @@ impl ThemePreset {
     }
 }
 
+/// Visible sentinel for an unparseable preset color: magenta, never black.
+const FALLBACK_COLOR: u32 = 0xff00ff;
+
+fn parse_hex(value: &str) -> Result<u32, std::num::ParseIntError> {
+    u32::from_str_radix(value.trim().trim_start_matches('#'), 16)
+}
+
+#[cfg(test)]
+fn hsla_lenient(value: &str) -> Hsla {
+    rgb(parse_hex(value).unwrap_or(FALLBACK_COLOR)).into()
+}
+
 fn hsla(value: &str) -> Hsla {
-    let raw = u32::from_str_radix(value.trim().trim_start_matches('#'), 16).unwrap_or(0);
+    // WHY a visible sentinel instead of silent black: `unwrap_or(0)` made a
+    // hand-edited typo render as opaque black with no signal. Keep a total
+    // function (the renderer needs one), but make failure loud — a magenta
+    // sentinel that is impossible to mistake for a real palette entry, plus
+    // `debug_assert!` so debug builds catch it. Tests exercise the sentinel
+    // via `hsla_lenient` (no assert) and the assert via the gated
+    // `should_panic` test below, since a plain call here would panic in
+    // debug builds before any assertion could run.
+    let raw = match parse_hex(value) {
+        Ok(raw) => raw,
+        Err(_) => {
+            debug_assert!(false, "invalid preset color: {value:?}");
+            FALLBACK_COLOR
+        }
+    };
     rgb(raw).into()
 }
 
@@ -165,5 +191,37 @@ mod tests {
         assert_eq!(value["background"], expected.colors[0]);
         assert_eq!(value["foreground"], expected.colors[1]);
         assert_eq!(value["cursor"], expected.colors[2]);
+    }
+
+    #[test]
+    fn every_preset_color_parses() {
+        for preset in super::PRESETS {
+            for color in preset.colors {
+                let trimmed = color.trim().trim_start_matches('#');
+                assert!(
+                    u32::from_str_radix(trimmed, 16).is_ok(),
+                    "preset {:?} has unparseable color {color:?}",
+                    preset.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bad_color_falls_back_to_sentinel_not_black() {
+        // Exercise the sentinel via the lenient path: calling `hsla` here
+        // would trip its `debug_assert!` in debug builds before asserting.
+        let sentinel = super::hsla_lenient("not-a-color");
+        let magenta = gpui::rgb(0xff00ff).into();
+        let black = gpui::rgb(0).into();
+        assert_eq!(sentinel, magenta);
+        assert_ne!(sentinel, black);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "invalid preset color")]
+    fn bad_color_trips_debug_assert() {
+        let _ = super::hsla("not-a-color");
     }
 }

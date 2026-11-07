@@ -42,9 +42,9 @@ pub fn encode_keystroke(keystroke: &Keystroke) -> Option<Vec<u8>> {
 fn control_byte(key: &str) -> Option<u8> {
     let byte = match key {
         "space" | "@" => 0x00,
-        "[" => 0x1b,
-        "\\" => 0x1c,
-        "]" => 0x1d,
+        "[" | "leftbracket" => 0x1b,
+        "\\" | "backslash" => 0x1c,
+        "]" | "rightbracket" => 0x1d,
         "^" => 0x1e,
         "_" | "/" => 0x1f,
         "?" => 0x7f,
@@ -106,7 +106,9 @@ fn printable(key: &str, key_char: Option<&str>, shift: bool) -> Option<Vec<u8>> 
         if ch.is_ascii_digit() {
             let shifted = match ch {
                 b'0' => ')', b'1' => '!', b'2' => '@', b'3' => '#', b'4' => '$',
-                b'5' => '%', b'6' => '^', b'7' => '&', b'8' => '*', _ => '(',
+                b'5' => '%', b'6' => '^', b'7' => '&', b'8' => '*', b'9' => ')',
+                // Fail closed: an unmapped digit emits nothing rather than a guessed char.
+                _ => return None,
             };
             return Some(vec![shifted as u8]);
         }
@@ -141,7 +143,7 @@ fn printable(key: &str, key_char: Option<&str>, shift: bool) -> Option<Vec<u8>> 
             "6" => "^",
             "7" => "&",
             "8" => "*",
-            "9" => "(",
+            "9" => ")",
             "0" => ")",
             "-" => "_",
             "=" => "+",

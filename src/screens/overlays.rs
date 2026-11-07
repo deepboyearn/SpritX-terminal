@@ -27,8 +27,51 @@ use crate::state::{
 };
 use crate::theme::Theme;
 
-const OVERLAY_Z: usize = 120;
+// Deferred-overlay priorities (higher paints later / receives clicks first):
+// context menus 110, popup backdrop 119, popups 120, modal/side modal 121,
+// toast 130. Kept distinct so click-outside ordering is not vector-order
+// dependent when a modal and a popup are stacked.
+pub(crate) const CONTEXT_MENU_Z: usize = 110;
+const POPUP_BACKDROP_Z: usize = 119;
+const POPUP_Z: usize = 120;
+const MODAL_Z: usize = 121;
+const TOAST_Z: usize = 130;
 const TOP_OFFSET: f32 = 108.0;
+
+thread_local! {
+    // Device-revoke confirm state lives only in this view layer. It must
+    // never be stored in `SpritXApp::recording_action`: the root key
+    // handler treats any non-None value there as "capture next chord as a
+    // keybinding" and would persist a bogus `remote-revoke:<id>` binding.
+    // This cell is cleared whenever the settings/remote modal is dismissed.
+    static ARMED_REVOKE: std::cell::RefCell<Option<String>> =
+        std::cell::RefCell::new(None);
+}
+
+fn armed_revoke() -> Option<String> {
+    ARMED_REVOKE.with(|state| state.borrow().clone())
+}
+
+fn set_armed_revoke(device_id: Option<String>) {
+    ARMED_REVOKE.with(|state| *state.borrow_mut() = device_id);
+}
+
+/// Full modal dismissal: delegate to the app's shared helper (which clears
+/// modal, popups, menus, tab/pane edit state and the inline settings
+/// field), then clear view-owned transient state the helper does not own.
+/// Taking this path from every dim-layer/X/close handler prevents a closed
+/// modal from leaving buffers that the next keydown would edit.
+fn dismiss_modal(app: &mut SpritXApp, cx: &mut Context<SpritXApp>) {
+    app.close_modal();
+    // close_modal does not cover recording/palette transients; clear them
+    // here so they cannot survive into the next modal or be captured as a
+    // shortcut chord after the dialog is gone.
+    app.recording_action = None;
+    app.palette_query.clear();
+    app.palette_selected = 0;
+    set_armed_revoke(None);
+    cx.notify();
+}
 
 // ---------------------------------------------------------------------------
 // Shared primitives
@@ -45,13 +88,9 @@ fn dim_layer(id: impl Into<ElementId>, theme: Theme, cx: &mut Context<SpritXApp>
         .size_full()
         .bg(theme.black_40)
         .occlude()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
-                this.modal = None;
-                cx.notify();
-            }),
-        )
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            dismiss_modal(this, cx);
+        }))
 }
 
 fn modal_layer(
@@ -83,7 +122,7 @@ fn modal_layer(
         ))
         .child(stage.child(card));
 
-    deferred(layer).with_priority(OVERLAY_Z).into_any_element()
+    deferred(layer).with_priority(MODAL_Z).into_any_element()
 }
 
 fn side_layer(
@@ -126,7 +165,7 @@ fn side_layer(
                 .child(panel),
         );
 
-    deferred(layer).with_priority(OVERLAY_Z).into_any_element()
+    deferred(layer).with_priority(MODAL_Z).into_any_element()
 }
 
 fn popup_layer(
@@ -144,14 +183,12 @@ fn popup_layer(
     if let Some(left) = left {
         popup = popup.left(px(left));
     }
-    deferred(popup.child(content))
-        .with_priority(OVERLAY_Z)
-        .into_any_element()
+    deferred(popup.child(content)).with_priority(POPUP_Z).into_any_element()
 }
 
 /// Transparent click-catcher under a toolbar popup. Without it the menu only
 /// closes on Escape or a second click on its own icon, which reads as stuck.
-/// Sits one level below `OVERLAY_Z` so the popup itself still takes clicks.
+/// Sits below `POPUP_Z` so the popup itself still takes clicks.
 pub fn render_popup_backdrop(cx: &mut Context<SpritXApp>) -> AnyElement {
     deferred(
         div()
@@ -170,7 +207,7 @@ pub fn render_popup_backdrop(cx: &mut Context<SpritXApp>) -> AnyElement {
                 }),
             ),
     )
-    .with_priority(OVERLAY_Z - 1)
+    .with_priority(POPUP_BACKDROP_Z)
     .into_any_element()
 }
 
@@ -289,7 +326,7 @@ fn empty_state(theme: Theme, text: &'static str) -> AnyElement {
 
 pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
-    let current = current_layout(&app.active_tab().tree);
+    let current = app.active_tab_checked().and_then(|tab| current_layout(&tab.tree));
     let mut presets = div().flex().flex_wrap().gap(px(8.));
     for (index, preset) in LAYOUT_PRESETS.iter().enumerate() {
         let id = preset.id;
@@ -356,13 +393,13 @@ pub fn render_layouts_popup(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> Any
                     div()
                         .text_size(px(10.5))
                         .text_color(theme.fg_dim)
-                        .child("Up to 4 panes per tab"),
+                        .child(format!("Up to {} panes per tab", crate::state::MAX_PANES_PER_TAB)),
                 )
                 .child(
                     div()
                         .text_size(px(10.5))
                         .text_color(theme.fg_dim)
-                        .child(format!("{} active", app.active_tab().pane_count())),
+                        .child(format!("{} active", app.active_tab_checked().map(|tab| tab.pane_count()).unwrap_or(0))),
                 ),
         )
         .into_any_element();
@@ -389,7 +426,12 @@ fn current_layout(tree: &crate::state::PaneNode) -> Option<&'static str> {
     use crate::state::SplitDirection::{Column, Row};
 
     let Split { direction, children, .. } = tree else { return Some("single") };
-    match (direction, children[0].as_ref(), children[1].as_ref()) {
+    // A malformed Split with fewer than two children must not panic the UI
+    // thread on every frame; treat it as an unknown layout instead.
+    let (Some(first), Some(second)) = (children.get(0), children.get(1)) else {
+        return None;
+    };
+    match (direction, first.as_ref(), second.as_ref()) {
         (Row, Leaf(_), Leaf(_)) => Some("two-cols"),
         (Column, Leaf(_), Leaf(_)) => Some("two-rows"),
         (Row, Leaf(_), right) if current_layout(right) == Some("two-rows") => Some("main-side"),
@@ -399,7 +441,6 @@ fn current_layout(tree: &crate::state::PaneNode) -> Option<&'static str> {
         _ => None,
     }
 }
-
 fn layout_preview(theme: Theme, hint: &'static str, selected: bool) -> AnyElement {
     let fill = if selected { theme.accent.opacity(0.24) } else { theme.fg_dim.opacity(0.13) };
     let mut preview = div()
@@ -736,7 +777,7 @@ pub fn render_toast(app: &SpritXApp, message: &str) -> AnyElement {
         )
         .into_any_element();
 
-    deferred(toast).with_priority(OVERLAY_Z + 10).into_any_element()
+    deferred(toast).with_priority(TOAST_Z).into_any_element()
 }
 
 // ---------------------------------------------------------------------------
@@ -969,7 +1010,7 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let command = command.clone();
                         let sent = this.send_to_terminal(&command, false);
-                        this.modal = None;
+                        dismiss_modal(this, cx);
                         if sent {
                             this.show_toast(format!("Inserted “{command}”"), cx);
                         } else {
@@ -1216,6 +1257,7 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                         this.settings_section = section;
                         this.settings_menu = None;
                         this.recording_action = None;
+                        set_armed_revoke(None);
                     }
                     cx.notify();
                 }))
@@ -1280,8 +1322,7 @@ fn render_settings(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                         .text_color(theme.fg_dim)
                         .hover(|s| s.bg(theme.white_06).text_color(theme.fg))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.modal = None;
-                            cx.notify();
+                            dismiss_modal(this, cx);
                         }))
                         .child(icon(Icon::X, 16.0, theme.fg_dim)),
                 ),
@@ -1410,6 +1451,12 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         .child(text_button("set-size-dec", "−", &theme).on_click(cx.listener(
                             |this, _, _, cx| {
                                 this.settings.font_size = (this.settings.font_size - 1.0).max(8.0);
+                                // Keep an active inline edit in sync so a later
+                                // Enter commits the stepper result, not the
+                                // stale buffer captured before the click.
+                                if matches!(this.settings_field, Some(SettingsField::FontSize)) {
+                                    this.settings_buf = (this.settings.font_size as u32).to_string();
+                                }
                                 this.save_settings();
                                 cx.notify();
                             },
@@ -1417,6 +1464,9 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         .child(text_button("set-size-inc", "+", &theme).on_click(cx.listener(
                             |this, _, _, cx| {
                                 this.settings.font_size = (this.settings.font_size + 1.0).min(40.0);
+                                if matches!(this.settings_field, Some(SettingsField::FontSize)) {
+                                    this.settings_buf = (this.settings.font_size as u32).to_string();
+                                }
                                 this.save_settings();
                                 cx.notify();
                             },
@@ -1502,66 +1552,35 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                         .flex()
                         .flex_wrap()
                         .gap(px(8.))
-                        .children(app.theme_names.iter().enumerate().map(|(index, name)| {
+                        .children(app.theme_names.iter().enumerate().filter_map(|(index, name)| {
                             let name = name.to_string();
                             let name_for_click = name.clone();
                             let selected = index == app.selected_theme;
-                            let palette = crate::theme_presets::PRESETS[index].theme();
-                            div()
-                                .id(("theme", index))
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.))
-                                .w(px(136.))
-                                .p(px(8.))
-                                .rounded(px(10.))
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(if selected { theme.bg_soft } else { theme.bg })
-                                .hover(|style| style.bg(theme.bg_soft))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .justify_center()
-                                        .gap(px(6.))
-                                        .h(px(48.))
-                                        .px(px(8.))
-                                        .rounded(px(6.))
-                                        .bg(palette.background)
-                                        .child(div().text_size(px(11.)).text_color(palette.foreground).child("❯ SpritX"))
-                                        .child(
-                                            div().flex().gap(px(4.)).children(
-                                                palette.ansi[1..7].iter().map(|color| {
-                                                    div().w(px(10.)).h(px(4.)).rounded(px(2.)).bg(*color)
-                                                }),
-                                            ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap(px(4.))
-                                        .text_size(px(11.))
-                                        .text_color(if selected {
-                                            theme.fg
-                                        } else {
-                                            theme.fg_dim
-                                        })
-                                        .child(name)
-                                        .when(selected, |row| row.child(icon(Icon::Check, 12.0, theme.accent))),
-                                )
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.apply_theme_index(index, cx);
-                                    this.show_toast(
-                                        format!("Theme changed to {name_for_click}"),
-                                        cx,
-                                    );
-                                }))
-                        })),
+                            // Skip a name whose preset is missing instead of
+                            // panicking if theme_names and PRESETS drift apart.
+                            let palette = crate::theme_presets::PRESETS.get(index)?.theme();
+                            Some(
+                                div()
+                                    .id(("theme", index))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.))
+                                    .w(px(136.))
+                                    .p(px(8.))
+                                    .rounded(px(10.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(if selected { theme.bg_soft } else { theme.bg })
+                                    .hover(|style| style.bg(theme.bg_soft))
+                                    .child(div().flex().flex_col().justify_center().gap(px(6.)).h(px(48.)).px(px(8.)).rounded(px(6.)).bg(palette.background).child(div().text_size(px(11.)).text_color(palette.foreground).child("❯ SpritX")).child(div().flex().gap(px(4.)).children(palette.ansi.get(1..7).unwrap_or(&[]).iter().map(|color| div().w(px(10.)).h(px(4.)).rounded(px(2.)).bg(*color)))))
+                                    .child(div().flex().items_center().justify_between().gap(px(4.)).text_size(px(11.)).text_color(if selected { theme.fg } else { theme.fg_dim }).child(name).when(selected, |row| row.child(icon(Icon::Check, 12.0, theme.accent))))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.apply_theme_index(index, cx);
+                                        this.show_toast(format!("Theme changed to {name_for_click}"), cx);
+                                    })),
+                            )
+                        }))
                 )
                 .child(settings_group(theme, "Palette"))
                 .child(
@@ -1709,8 +1728,8 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 .child(settings_group(theme, "Command alerts"))
                 .child(setting_row(
                     theme,
-                    "Notify on long commands",
-                    "Shown when SpritX is unfocused",
+                    "Desktop completion notifications",
+                    "Announce completed commands in the desktop notification center",
                     toggle_control(
                         "set-notify",
                         theme,
@@ -2053,10 +2072,65 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 .child(note(
                     theme,
                     "Fixed: Ctrl+1…9 tabs · Ctrl+/− zoom · Alt+←↑↓→ panes",
-                ));
+                ))
+                .child(settings_group(theme, "Process control"))
+                .child(note(theme, "Ctrl+C interrupts the foreground process. Ctrl+Shift+C copies selected text."))
+                .child(note(theme, "Ctrl+Shift+K force stops this terminal's processes and restarts its shell."))
+                .child(note(theme, if cfg!(windows) {
+                    "Ctrl+D sends EOF when supported by the app. Windows console readers may use Ctrl+Z followed by Enter."
+                } else {
+                    "Ctrl+D sends EOF. Ctrl+Z suspends the foreground job; fg resumes it. Ctrl+\\ sends SIGQUIT."
+                }));
         }
         SettingsSection::General => {
             body = body
+                .child(settings_group(theme, "Workspace recovery"))
+                .child(setting_row(
+                    theme, "Close window to background",
+                    "Keep SpritX available in the system tray. Open it again from its icon or launcher.",
+                    toggle_control("set-close-to-tray", theme, app.settings.close_to_tray, cx, |this| {
+                        this.settings.close_to_tray = !this.settings.close_to_tray;
+                    }),
+                ))
+                .child(setting_row(
+                    theme, "Restore workspace on startup",
+                    "Reopen tabs, split layouts, project folders and the active pane",
+                    toggle_control("set-restore-workspace", theme, app.settings.restore_workspace, cx, |this| {
+                        this.settings.restore_workspace = !this.settings.restore_workspace;
+                    }),
+                ))
+                .child(setting_row(
+                    theme, "Recover running sessions after an app restart",
+                    "Requires workspace restore. Explicit Quit stops current sessions.",
+                    toggle_control("set-keep-sessions", theme, app.settings.keep_sessions, cx, |this| {
+                        this.settings.keep_sessions = !this.settings.keep_sessions;
+                    }),
+                ))
+                .child(setting_row(
+                    theme, "Save terminal output locally",
+                    "Store a bounded output history on this device. Terminal output can contain sensitive data.",
+                    toggle_control("set-save-output", theme, app.settings.save_terminal_output, cx, |this| {
+                        this.settings.save_terminal_output = !this.settings.save_terminal_output;
+                    }),
+                ))
+                .child(setting_row(
+                    theme, "Reduced motion",
+                    "Use a static running indicator instead of the animated dots",
+                    toggle_control("set-reduced-motion", theme, app.settings.reduced_motion, cx, |this| {
+                        this.settings.reduced_motion = !this.settings.reduced_motion;
+                    }),
+                ))
+                .child(
+                    text_button("clear-saved-workspace", "Clear saved workspace", &theme)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.recent_projects.clear();
+                            this.settings.restore_workspace = false;
+                            this.settings.save_terminal_output = false;
+                            this.save_settings();
+                            this.checkpoint_workspace();
+                            this.show_toast("Saved workspace cleared. Restore and output saving are now off. Current sessions remain open.", cx);
+                        })),
+                )
                 .child(settings_group(theme, "Workspace behavior"))
                 .child(setting_row(
                     theme,
@@ -2101,6 +2175,9 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 .child(note(
                     theme,
                     "Export a backup of your preferences or import an existing configuration.",
+                ))
+                .child(text_button("general-quit", "Quit SpritX", &theme).on_click(
+                    cx.listener(|this, _, _, cx| this.quit_desktop(cx)),
                 ));
         }
         SettingsSection::About => {
@@ -2647,6 +2724,9 @@ fn ansi_grid(theme: Theme, ansi: &[gpui::Hsla; 16]) -> AnyElement {
 
     let mut grid = div().flex().flex_wrap().gap(px(8.));
     for (index, label) in LABELS.iter().enumerate() {
+        // Skip a swatch whose color is missing rather than panicking if the
+        // ANSI array and labels drift apart.
+        let Some(color) = ansi.get(index) else { continue };
         grid = grid.child(
             div()
                 .flex()
@@ -2657,7 +2737,7 @@ fn ansi_grid(theme: Theme, ansi: &[gpui::Hsla; 16]) -> AnyElement {
                     div()
                         .size(px(18.))
                         .rounded(px(4.))
-                        .bg(ansi[index])
+                        .bg(*color)
                         .border_1()
                         .border_color(theme.border),
                 )
@@ -2704,8 +2784,7 @@ fn remote_devices(theme: Theme, app: &SpritXApp, cx: &mut Context<SpritXApp>) ->
 
     for device in &status.devices {
         let live = device.connections > 0;
-        let armed = app.recording_action.as_deref()
-            == Some(format!("remote-revoke:{}", device.id).as_str());
+        let armed = armed_revoke().as_deref() == Some(device.id.as_str());
         let subtitle = if live {
             format!("connected · {} session(s)", device.connections)
         } else {
@@ -2764,11 +2843,14 @@ fn remote_devices(theme: Theme, app: &SpritXApp, cx: &mut Context<SpritXApp>) ->
                         .text_color(if armed { theme.danger } else { theme.fg_dim })
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let armed_key = format!("remote-revoke:{id}");
-                            if this.recording_action.as_deref() == Some(armed_key.as_str()) {
+                            if armed_revoke().as_deref() == Some(id.as_str()) {
+                                set_armed_revoke(None);
                                 this.remote_revoke(&id, cx);
                             } else {
-                                this.recording_action = Some(armed_key);
+                                // Arm only the view-local confirm state; never
+                                // touch recording_action, which the root key
+                                // handler would treat as keybinding capture.
+                                set_armed_revoke(Some(id.clone()));
                                 cx.notify();
                             }
                         }))
@@ -2924,8 +3006,7 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                         .text_color(theme.fg_dim)
                         .hover(|s| s.bg(theme.white_06).text_color(theme.fg))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.modal = None;
-                            cx.notify();
+                            dismiss_modal(this, cx);
                         }))
                         .child(icon(Icon::X, 16.0, theme.fg_dim)),
                 ),
@@ -3335,8 +3416,7 @@ fn render_remote_dialog(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                             .w_full()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.remote_stop(cx);
-                                this.modal = None;
-                                cx.notify();
+                                dismiss_modal(this, cx);
                             })),
                     ),
             )
@@ -3394,14 +3474,13 @@ fn render_close_confirm(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElem
                 .gap(px(8.))
                 .child(text_button("close-cancel", "Cancel", &theme).on_click(cx.listener(
                     |this, _, _, cx| {
-                        this.modal = None;
-                        cx.notify();
+                        dismiss_modal(this, cx);
                     },
                 )))
                 .child(
                     danger_button("close-confirm", "Close anyway", &theme).on_click(cx.listener(
                         |this, _, _, cx| {
-                            this.modal = None;
+                            dismiss_modal(this, cx);
                             let index = this.active_tab;
                             this.close_tab(index, cx);
                         },

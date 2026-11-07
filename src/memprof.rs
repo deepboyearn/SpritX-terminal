@@ -118,7 +118,9 @@ pub struct MemScope {
 
 impl Drop for MemScope {
     fn drop(&mut self) {
-        CURRENT_REGION.with(|cell| cell.set(self.saved));
+        // `try_with` because a `MemScope` can be dropped during TLS teardown,
+        // where `with` would panic; a destroyed cell needs no restore.
+        let _ = CURRENT_REGION.try_with(|cell| cell.set(self.saved));
     }
 }
 
@@ -126,11 +128,15 @@ impl Drop for MemScope {
 /// `region`. Nesting is fine: the previous region is restored on drop.
 #[must_use]
 pub fn scope(region: Region) -> MemScope {
-    let saved = CURRENT_REGION.with(|cell| {
-        let prev = cell.get();
-        cell.set(region as u8);
-        prev
-    });
+    // `try_with` because this can run during TLS teardown; treat a destroyed
+    // cell as `Other` rather than panicking in the allocator path.
+    let saved = CURRENT_REGION
+        .try_with(|cell| {
+            let prev = cell.get();
+            cell.set(region as u8);
+            prev
+        })
+        .unwrap_or(Region::Other as u8);
     MemScope { saved }
 }
 
@@ -138,10 +144,12 @@ struct NoReenter;
 impl NoReenter {
     #[inline]
     fn new() -> Option<NoReenter> {
-        if IN_TRACKER.with(|flag| flag.get()) {
+        // `try_with` because the allocator runs during TLS destruction, where
+        // `with` panics; a destroyed cell means "already in tracker" (skip).
+        if IN_TRACKER.try_with(|flag| flag.get()).unwrap_or(true) {
             None
         } else {
-            IN_TRACKER.with(|flag| flag.set(true));
+            let _ = IN_TRACKER.try_with(|flag| flag.set(true));
             Some(NoReenter)
         }
     }
@@ -149,7 +157,8 @@ impl NoReenter {
 impl Drop for NoReenter {
     #[inline]
     fn drop(&mut self) {
-        IN_TRACKER.with(|flag| flag.set(false));
+        // `try_with` because a `NoReenter` dropped during TLS teardown must not panic.
+        let _ = IN_TRACKER.try_with(|flag| flag.set(false));
     }
 }
 
@@ -162,7 +171,10 @@ fn record_alloc(ptr: usize, size: usize) {
     let now = LIVE_BYTES.fetch_add(size as u64, Relaxed) + size as u64;
     PEAK_BYTES.fetch_max(now, Relaxed);
 
-    let region = CURRENT_REGION.with(|cell| cell.get());
+    // `try_with` because this runs on the allocator path during TLS teardown.
+    let region = CURRENT_REGION
+        .try_with(|cell| cell.get())
+        .unwrap_or(Region::Other as u8);
     REGION_LIVE[region as usize % REGION_COUNT].fetch_add(size as u64, Relaxed);
     if let Ok(mut shard) = REG_SHARDS[shard_for(ptr)].lock() {
         shard.get_or_insert_with(HashMap::new).insert(ptr, region);

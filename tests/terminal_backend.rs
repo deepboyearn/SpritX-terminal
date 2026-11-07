@@ -252,3 +252,61 @@ fn mouse_reporting_is_detected_and_forwarded_to_the_child() {
         session.screen_text()
     );
 }
+
+// --- Regression tests: terminal-grid-1 (grid_size upper clamp) ---
+
+fn metrics() -> spritx_terminal::terminal::TermMetrics {
+    spritx_terminal::terminal::TermMetrics { cell_width: 10.0, cell_height: 20.0 }
+}
+
+#[test]
+fn grid_size_clamps_huge_areas_to_max() {
+    use spritx_terminal::terminal::{MAX_COLS, MAX_ROWS, grid_size};
+    let (cols, rows) = grid_size(1e9, 1e9, metrics());
+    assert_eq!(cols, MAX_COLS, "cols must clamp to MAX_COLS, got {cols}");
+    assert_eq!(rows, MAX_ROWS, "rows must clamp to MAX_ROWS, got {rows}");
+}
+
+#[test]
+fn grid_size_zero_and_nonfinite_areas_yield_one_by_one() {
+    use spritx_terminal::terminal::grid_size;
+    assert_eq!(grid_size(0.0, 0.0, metrics()), (1, 1));
+    assert_eq!(grid_size(f32::NAN, f32::INFINITY, metrics()), (1, 1));
+    assert_eq!(grid_size(-100.0, -100.0, metrics()), (1, 1));
+}
+
+#[test]
+fn grid_size_normal_area_maps_unchanged() {
+    use spritx_terminal::terminal::grid_size;
+    // 800px / 10px = 80 cols, 300px / 20px = 15 rows.
+    assert_eq!(grid_size(800.0, 300.0, metrics()), (80, 15));
+    // Just over one cell still floors to 1, never 0.
+    assert_eq!(grid_size(5.0, 5.0, metrics()), (1, 1));
+}
+
+#[test]
+fn grid_size_boundary_just_above_max_clamps() {
+    use spritx_terminal::terminal::{MAX_COLS, MAX_ROWS, grid_size};
+    let (cols, rows) = grid_size(MAX_COLS as f32 * 10.0 + 500.0, MAX_ROWS as f32 * 20.0 + 500.0, metrics());
+    assert_eq!((cols, rows), (MAX_COLS, MAX_ROWS));
+}
+
+// --- Regression test: terminal-reader-1 (reader survives heavy output) ---
+
+#[cfg(unix)]
+#[test]
+fn reader_survives_output_exceeding_pending_cap() {
+    // Emit far more than MAX_PENDING (2 MiB) as '\n'-terminated lines. The
+    // reader must truncate at a newline boundary and keep pumping; the final
+    // marker must still arrive. Pre-fix the reader `expect`ed the pending
+    // lock and could panic on a poisoned mutex, killing the session silently.
+    let mut session = shell(
+        "yes 'HEAVYLINE0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' | head -n 60000; printf 'DONE_MARKER\\n'; sleep 0.2",
+    );
+    assert!(
+        wait_for(&mut session, "DONE_MARKER", Duration::from_secs(20)),
+        "session did not survive heavy output; screen tail was: {}",
+        session.screen_text().chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect::<String>()
+    );
+    assert!(session.size().0 > 1 && session.size().1 > 1, "size: {:?}", session.size());
+}

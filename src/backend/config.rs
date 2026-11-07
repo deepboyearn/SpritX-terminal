@@ -21,9 +21,18 @@ pub struct AppConfig {
     pub shell: ShellConfig,
     pub notifications: NotificationsConfig,
     pub file_tree: FileTreeConfig,
+    pub cli_launcher: CliLauncherConfig,
     pub remote: RemoteSettings,
     pub history: HistorySettings,
     pub keybindings: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CliLauncherConfig {
+    pub manual: Vec<String>,
+    pub pinned: Vec<String>,
+    pub hidden: Vec<String>,
 }
 
 impl AppConfig {
@@ -160,6 +169,11 @@ impl Default for ThemeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BehaviorConfig {
+    pub close_to_tray: bool,
+    pub restore_workspace: bool,
+    pub keep_sessions: bool,
+    pub save_terminal_output: bool,
+    pub reduced_motion: bool,
     pub focus_follows_mouse: bool,
     pub show_git_branch: bool,
     pub persist_blocks: bool,
@@ -168,6 +182,11 @@ pub struct BehaviorConfig {
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
+            close_to_tray: true,
+            restore_workspace: true,
+            keep_sessions: true,
+            save_terminal_output: true,
+            reduced_motion: false,
             focus_follows_mouse: false,
             show_git_branch: true,
             persist_blocks: true,
@@ -296,29 +315,80 @@ pub fn config_path() -> Option<PathBuf> {
 pub fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     use std::io::Write as _;
 
-    let tmp = {
+    // Unique temp name per write (not a fixed ".tmp"): two writers to the same
+    // path must not truncate each other's temp file (lost update). Pid + a
+    // process-wide counter make collisions across processes and threads
+    // practically impossible. The temp stays in the same directory so rename
+    // remains atomic (same filesystem). The caller owns `path`'s parent
+    // directory (call sites create it first via save_to/save).
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = {
         let mut t = path.as_os_str().to_owned();
-        t.push(".tmp");
+        t.push(format!(".tmp.{}.{}", std::process::id(), seq));
         PathBuf::from(t)
     };
-    {
+    // Resolve the temp path lazily: create_new never follows a pre-existing
+    // symlink at the temp name, and on AlreadyExists we retry with a fresh
+    // suffix rather than truncating a file we did not create ourselves.
+    let mut attempt = 0u32;
+    let (tmp, mut file) = loop {
+        let tmp = if attempt == 0 {
+            base.clone()
+        } else {
+            let mut t = path.as_os_str().to_owned();
+            t.push(format!(".tmp.{}.{}.{}", std::process::id(), seq, attempt));
+            PathBuf::from(t)
+        };
         let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, path)
+        match opts.open(&tmp) {
+            Ok(file) => break (tmp, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                attempt += 1;
+                if attempt > 100 {
+                    return Err(error);
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    // Clean up the temp on any failure (after we own it) so no stray ".tmp*" remains.
+    let cleanup = |ok: bool| {
+        if !ok {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    };
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&tmp, path)?;
+        // Persist the rename's directory entry: without this a POSIX crash right
+        // after rename could lose the file even though its bytes were synced.
+        // On some platforms (notably Windows) opening a directory to sync is
+        // unsupported; failures here are best-effort and intentionally ignored.
+        if let Some(parent) = tmp.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    })();
+    // rename consumed the temp on success; only clean it up on failure.
+    cleanup(result.is_ok());
+    result
 }
 
 /// Load the user config, creating a commented default file on first run.

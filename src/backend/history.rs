@@ -170,7 +170,12 @@ impl HistoryStore {
     pub fn clear(&self) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
         writer().send(WriterMessage::Clear(self.path.clone(), tx)).map_err(|e| e.to_string())?;
-        rx.recv().map_err(|e| e.to_string())?
+        // WHY the timeout: this waits on the background writer thread. If that
+        // thread never started (its spawn failure is logged below) or is
+        // wedged, a bare `recv()` hangs the caller — potentially the UI thread
+        // — forever. A timeout turns an indefinite hang into a visible error.
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| e.to_string())?
     }
 }
 
@@ -214,21 +219,35 @@ fn writer() -> &'static Sender<WriterMessage> {
                     let reopen = open.as_ref().map(|(p, _)| p != &path).unwrap_or(true);
                     if reopen {
                         if let Some(dir) = path.parent() {
-                            let _ = std::fs::create_dir_all(dir);
+                            if let Err(e) = std::fs::create_dir_all(dir) {
+                                // WHY the log: `open` is None from here on, so
+                                // every append for this path would be silently
+                                // skipped; surface the cause instead.
+                                eprintln!("[spritx] could not create history directory {}: {e}", dir.display());
+                            }
                         }
-                        open = std::fs::OpenOptions::new()
+                        match std::fs::OpenOptions::new()
                             .create(true)
                             .append(true)
                             .open(&path)
-                            .ok()
-                            .map(|file| (path, file));
+                        {
+                            Ok(file) => open = Some((path, file)),
+                            Err(e) => {
+                                eprintln!("[spritx] could not open history file {}: {e}", path.display());
+                                open = None;
+                            }
+                        }
                     }
                     if let Some((_, file)) = open.as_mut() {
-                        let _ = file.write_all(line.as_bytes());
-                        let _ = file.write_all(b"\n");
+                        if let Err(e) = file.write_all(line.as_bytes()) {
+                            eprintln!("[spritx] could not write history entry: {e}");
+                        } else if let Err(e) = file.write_all(b"\n") {
+                            eprintln!("[spritx] could not write history entry: {e}");
+                        }
                     }
                 }
             })
+            .map_err(|e| eprintln!("[spritx] could not spawn history writer thread: {e}"))
             .ok();
         tx
     })

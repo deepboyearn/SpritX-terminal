@@ -118,6 +118,111 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
     }
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
+/// Per-path worktree status for `cwd`'s repository, keyed by absolute path.
+///
+/// WHY: the file tree needs a badge per row, so the whole porcelain-v2 blob is
+/// parsed once per tree refresh (off the render thread) instead of spawning
+/// `git` per row. Paths come back from git relative to the worktree root; they
+/// are re-anchored onto that root so callers can look up expanded filesystem
+/// paths directly. Git is invoked with an argument array only, never a shell.
+/// Entries that are not inside a repository, and any failure to run `git`
+/// (missing binary, dubious ownership, …), yield an empty map — the caller
+/// renders no badges, matching the "git not available" pattern elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitPathStatus {
+    /// Staged, unstaged, or type-change modification.
+    Modified,
+    /// New tracked file (staged addition).
+    Added,
+    /// Tracked file missing from the worktree.
+    Deleted,
+    /// Untracked file (git collapses wholly-untracked directories to one `?`
+    /// entry for the directory itself).
+    Untracked,
+}
+
+pub fn git_path_statuses(cwd: impl AsRef<Path>) -> std::collections::HashMap<PathBuf, GitPathStatus> {
+    let mut out = std::collections::HashMap::new();
+    let cwd = cwd.as_ref();
+    if !cwd.is_dir() {
+        return out;
+    }
+    let root_line = match git(cwd, &["rev-parse", "--show-toplevel"]) {
+        Some(line) => line,
+        None => return out,
+    };
+    let root_text = root_line.lines().next().unwrap_or("").trim();
+    if root_text.is_empty() {
+        return out;
+    }
+    let root = PathBuf::from(root_text);
+    let status = match git(cwd, &["status", "--porcelain=v2", "--untracked-files=normal"]) {
+        Some(status) => status,
+        None => return out,
+    };
+    for line in status.lines() {
+        let (rel, status) = match parse_porcelain_v2_line(line) {
+            Some(parsed) => parsed,
+            None => continue,
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        out.insert(root.join(rel), status);
+    }
+    out
+}
+
+/// Narrow one porcelain-v2 entry to its worktree-relative path and the status
+/// class the file tree badges. Ordinary (`1`), renamed (`2`), untracked (`?`),
+/// and ignored (`!`) records are understood; ignored paths never surface
+/// because the caller omits `--ignored`. A rename/copied entry names the new
+/// path after the tab, which is the path the tree holds.
+fn parse_porcelain_v2_line(line: &str) -> Option<(PathBuf, GitPathStatus)> {
+    if let Some(rest) = line.strip_prefix("? ") {
+        return Some((PathBuf::from(rest.trim()), GitPathStatus::Untracked));
+    }
+    if line.starts_with('!') || line.starts_with('#') {
+        return None;
+    }
+    // `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` where XY is the
+    // index/worktree two-letter status. Renames/copies (`2`) insert a score
+    // field before `<orig>\t<path>`; the tree holds the new path after the tab.
+    let fields: Vec<&str> = line.splitn(10, ' ').collect();
+    if fields.len() < 9 {
+        return None;
+    }
+    let xy = fields[1];
+    let status = xy_status(xy)?;
+    let path_field = if fields[0] == "2" {
+        *fields.get(9)?
+    } else {
+        fields[8]
+    };
+    let path = path_field.rsplit('\t').next().unwrap_or(path_field);
+    Some((PathBuf::from(path), status))
+}
+
+/// Fold porcelain-v2's two status letters into the badge class. Conflicts
+/// (`UU`, `AA`, `U*`, …) are badges too — the file definitely needs attention.
+fn xy_status(xy: &str) -> Option<GitPathStatus> {
+    let bytes = xy.as_bytes();
+    if bytes.len() != 2 {
+        return None;
+    }
+    let (x, y) = (bytes[0], bytes[1]);
+    if x == b'U' || y == b'U' || (x == b'A' && y == b'A') || (x == b'D' && y == b'D') {
+        return Some(GitPathStatus::Modified);
+    }
+    match (x, y) {
+        (b'A', _) => Some(GitPathStatus::Added),
+        (b'D', _) | (_, b'D') => Some(GitPathStatus::Deleted),
+        (b'M', _) | (_, b'M') | (b'T', _) | (_, b'T') | (b'R', _) | (_, b'R') | (b'C', _) | (_, b'C') => {
+            Some(GitPathStatus::Modified)
+        }
+        _ => None,
+    }
+}
 
 fn head_fallback(cwd: &Path) -> Option<GitInfo> {
     let (git_dir, root) = find_git_dir(cwd)?;

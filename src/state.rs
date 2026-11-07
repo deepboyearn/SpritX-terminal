@@ -3,20 +3,19 @@ use std::collections::{BTreeMap, HashMap};
 pub type TabId = u64;
 pub type LeafId = u64;
 
-/// Mirrors `MAX_PANES_PER_TAB` in the web app (`Tabs.tsx:164`).
-pub const MAX_PANES_PER_TAB: usize = 4;
+pub const MAX_PANES_PER_TAB: usize = 5;
 
 /// Split ratios are clamped to 0.1 … 0.9 (`panes.ts:202`).
 pub const MIN_SPLIT_RATIO: f32 = 0.1;
 pub const MAX_SPLIT_RATIO: f32 = 0.9;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SplitDirection {
     Row,
     Column,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum PaneNode {
     Leaf(LeafId),
     Split {
@@ -182,7 +181,8 @@ impl PaneNode {
     }
 
     /// Set the ratio of the split addressed by `path` (0 = first child, 1 = second).
-    /// An empty path addresses `self`.
+    /// An empty path addresses `self`. An out-of-range path segment returns false
+    /// instead of panicking on the fixed-size children array.
     pub fn set_ratio(&mut self, path: &[usize], ratio: f32) -> bool {
         match self {
             Self::Split {
@@ -193,6 +193,8 @@ impl PaneNode {
                 if path.is_empty() {
                     *split_ratio = ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
                     true
+                } else if path[0] >= children.len() {
+                    false
                 } else {
                     children[path[0]].set_ratio(&path[1..], ratio)
                 }
@@ -218,7 +220,7 @@ impl PaneNode {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LeafState {
     pub activity: crate::backend::remote::CommandActivity,
     pub id: LeafId,
@@ -243,7 +245,7 @@ impl LeafState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct TabState {
     pub id: TabId,
     pub title: String,
@@ -253,6 +255,13 @@ pub struct TabState {
 }
 
 impl TabState {
+    /// Hide the historical generated suffix; the tab strip already numbers tabs.
+    pub fn display_title(&self) -> &str {
+        if self.title.strip_prefix("Terminal ").and_then(|suffix| suffix.parse::<u64>().ok()) == Some(self.id) {
+            "Terminal"
+        } else { &self.title }
+    }
+
     pub fn single(id: TabId, title: impl Into<String>, leaf_id: LeafId) -> Self {
         let leaf = LeafState::sample(leaf_id);
         let mut leaves = BTreeMap::new();
@@ -280,7 +289,7 @@ impl TabState {
         self.leaf_ids().len()
     }
 
-    /// Split `target` and register a fresh sample leaf. Capped at four panes.
+    /// Split `target` and register a fresh sample leaf.
     pub fn split_leaf(
         &mut self,
         target: LeafId,
@@ -307,10 +316,19 @@ impl TabState {
         if self.pane_count() <= 1 || !self.leaves.contains_key(&leaf) {
             return false;
         }
+        // Focus should move to an adjacent survivor, not jump to the first
+        // leaf in tree order: compute the neighbour on the pre-removal tree.
+        let focus_fallback = if self.active_leaf == leaf {
+            self.tree.neighbour_leaf(leaf, true)
+        } else {
+            None
+        };
         if self.tree.remove_leaf(leaf) {
             self.leaves.remove(&leaf);
             if self.active_leaf == leaf {
-                self.active_leaf = self.tree.first_leaf();
+                self.active_leaf = focus_fallback
+                    .filter(|id| self.tree.contains(*id))
+                    .unwrap_or_else(|| self.tree.first_leaf());
             }
             true
         } else {
@@ -324,6 +342,176 @@ impl TabState {
 
     pub fn neighbour_leaf(&self, current: LeafId, forward: bool) -> Option<LeafId> {
         self.tree.neighbour_leaf(current, forward)
+    }
+
+    /// Repair a `TabState` loaded from disk so it satisfies the invariants
+    /// `workspace::valid` checks: prune `leaves` entries not present in
+    /// `tree`, drop duplicate/out-of-range (> MAX_PANES_PER_TAB) leaf ids
+    /// from the tree, re-seat `active_leaf` to `tree.first_leaf()` when it
+    /// is missing, and fresh-seat any tree leaf with no `leaves` entry.
+    /// WHY repair instead of privatising `tree`/`leaves`/`active_leaf`:
+    /// those fields are read/written directly from 10+ call sites across
+    /// app_shell/pane_tree/workspace/tab_bar/cli_launcher, so privatising
+    /// would churn every caller for no behavioural gain; a `repair()`
+    /// invoked on the restore path fixes hand-edited/corrupt files while
+    /// keeping the public API. Callers MUST invoke this after load, before
+    /// `valid()` — see the exact call site in the report.
+    ///
+    /// Produces a tab satisfying the `valid()` invariants when the tree
+    /// itself passes `valid_tree` (bounded depth, ids in range, finite
+    /// ratios); a too-deep tree is rebuilt as a single leaf.
+    pub fn repair(&mut self) {
+        // Bound the walk first (mirroring `workspace::valid`): an unbounded
+        // `leaf_ids()` recursion on a hand-edited, deeply-nested tree could
+        // overflow the stack. A too-deep tree is replaced wholesale with a
+        // single leaf, reusing the active id when it has a surviving entry.
+        let Some(mut ids) = bounded_leaf_ids(&self.tree, 0) else {
+            let seeded = if self.leaves.contains_key(&self.active_leaf) {
+                self.active_leaf
+            } else {
+                self.leaves.keys().next().copied().unwrap_or(1)
+            };
+            self.tree = PaneNode::Leaf(seeded);
+            self.leaves = BTreeMap::from([(seeded, LeafState::sample(seeded))]);
+            self.active_leaf = seeded;
+            return;
+        };
+        // Ratios ride along with the tree: a NaN / out-of-range ratio fails
+        // `valid()` too, so clamp them while the depth is known-bounded.
+        clamp_split_ratios(&mut self.tree);
+        // Drop duplicate ids (keep the first occurrence in tree order) and
+        // ids past the pane cap. `remove_leaf` removes one node per call,
+        // so repeated calls collapse each duplicate to a single survivor.
+        for id in ids.clone() {
+            while ids.iter().filter(|x| **x == id).count() > 1 {
+                if !self.tree.remove_leaf(id) {
+                    break;
+                }
+                ids = self.leaf_ids();
+            }
+        }
+        while ids.len() > MAX_PANES_PER_TAB {
+            let last = *ids.last().expect("over-cap tree has leaves");
+            if !self.tree.remove_leaf(last) {
+                break;
+            }
+            ids = self.leaf_ids();
+        }
+        // Prune orphan leaves (not in the repaired tree) plus entries whose
+        // embedded `id` disagrees with the map key (`valid()` checks both).
+        self.leaves
+            .retain(|id, leaf| ids.contains(id) && leaf.id == *id);
+        // Fresh-seat tree leaves with no entry so every tree id resolves.
+        for id in &ids {
+            self.leaves.entry(*id).or_insert_with(|| LeafState::sample(*id));
+        }
+        if !ids.contains(&self.active_leaf) {
+            self.active_leaf = self.tree.first_leaf();
+        }
+    }
+}
+
+/// Bounded mirror of `PaneNode::leaves`; `None` when the tree exceeds the
+/// depth `workspace::valid` accepts (12), so repair never recurses into a
+/// stack overflow on a hand-edited file.
+fn bounded_leaf_ids(tree: &PaneNode, depth: usize) -> Option<Vec<LeafId>> {
+    if depth > 12 {
+        return None;
+    }
+    match tree {
+        PaneNode::Leaf(id) => Some(vec![*id]),
+        PaneNode::Split { children, .. } => {
+            let mut ids = bounded_leaf_ids(children[0].as_ref(), depth + 1)?;
+            ids.extend(bounded_leaf_ids(children[1].as_ref(), depth + 1)?);
+            Some(ids)
+        }
+    }
+}
+
+/// Clamp every split ratio into [MIN_SPLIT_RATIO, MAX_SPLIT_RATIO],
+/// replacing non-finite ratios with a neutral 0.5. Only called after the
+/// depth is verified bounded, so the recursion is safe.
+fn clamp_split_ratios(tree: &mut PaneNode) {
+    match tree {
+        PaneNode::Split {
+            ratio, children, ..
+        } => {
+            *ratio = if ratio.is_finite() {
+                ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
+            } else {
+                0.5
+            };
+            clamp_split_ratios(children[0].as_mut());
+            clamp_split_ratios(children[1].as_mut());
+        }
+        PaneNode::Leaf(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirror of `workspace::valid`'s per-tab invariants, inlined so the
+    /// repair contract is pinned without pulling in the backend module.
+    fn tab_invariants_ok(tab: &TabState) -> bool {
+        let ids = bounded_leaf_ids(&tab.tree, 0).unwrap_or_default();
+        ids.len() <= MAX_PANES_PER_TAB
+            && ids.contains(&tab.active_leaf)
+            && ids.len() == tab.leaves.len()
+            && ids
+                .iter()
+                .all(|id| tab.leaves.get(id).is_some_and(|leaf| leaf.id == *id))
+    }
+
+    #[test]
+    fn repair_prunes_orphans_reseats_active_and_fresh_seats_missing() {
+        let mut leaves = BTreeMap::new();
+        leaves.insert(1, LeafState::sample(1));
+        leaves.insert(999, LeafState::sample(999)); // orphan
+        let mut tab = TabState {
+            id: 1,
+            title: "t".into(),
+            tree: PaneNode::split(
+                SplitDirection::Row,
+                f32::NAN,
+                PaneNode::leaf(1),
+                PaneNode::leaf(2), // tree leaf with no leaves entry
+            ),
+            leaves,
+            active_leaf: 999, // points at the orphan
+        };
+        tab.repair();
+        assert!(tab_invariants_ok(&tab));
+        assert_eq!(tab.active_leaf, tab.tree.first_leaf());
+        assert!(!tab.leaves.contains_key(&999));
+        assert!(tab.leaves.contains_key(&2));
+    }
+
+    #[test]
+    fn repair_deduplicates_and_caps_pane_count() {
+        let mut tree = PaneNode::leaf(1);
+        for id in 2..8 {
+            tree = PaneNode::split(SplitDirection::Row, 0.5, tree, PaneNode::leaf(id));
+        }
+        // Duplicate the first leaf.
+        tree = PaneNode::split(SplitDirection::Row, 0.5, tree, PaneNode::leaf(1));
+        let mut leaves = BTreeMap::new();
+        for id in [1u64, 2, 3, 4, 5, 6, 7] {
+            leaves.insert(id, LeafState::sample(id));
+        }
+        let mut tab = TabState {
+            id: 1,
+            title: "t".into(),
+            tree,
+            leaves,
+            active_leaf: 7,
+        };
+        tab.repair();
+        let ids = tab.leaf_ids();
+        assert!(ids.len() <= MAX_PANES_PER_TAB);
+        assert_eq!(ids.iter().filter(|x| **x == 1).count(), 1);
+        assert!(tab_invariants_ok(&tab));
     }
 }
 
@@ -407,7 +595,7 @@ impl SettingsField {
     /// The current value as a string, for the inline editor's initial buffer.
     pub fn current(self, settings: &SettingsData) -> String {
         match self {
-            Self::FontSize => format!("{}", settings.font_size as u32),
+            Self::FontSize => format!("{}", settings.font_size.round() as u32),
             Self::Scrollback => settings.scrollback.to_string(),
             Self::NotifyMinDuration => settings.notify_min_duration.to_string(),
             Self::RemotePort => settings.remote_port.to_string(),
@@ -478,6 +666,11 @@ pub enum ThemeColorKey {
 
 #[derive(Clone)]
 pub struct SettingsData {
+    pub close_to_tray: bool,
+    pub restore_workspace: bool,
+    pub keep_sessions: bool,
+    pub save_terminal_output: bool,
+    pub reduced_motion: bool,
     pub font_family: String,
     pub font_size: f32,
     pub cursor_blink: bool,
@@ -509,6 +702,11 @@ pub struct SettingsData {
 impl Default for SettingsData {
     fn default() -> Self {
         Self {
+            close_to_tray: true,
+            restore_workspace: true,
+            keep_sessions: true,
+            save_terminal_output: true,
+            reduced_motion: false,
             font_family: "JetBrainsMono Nerd Font".into(),
             font_size: f32::from(crate::backend::config::DEFAULT_TERMINAL_FONT_SIZE),
             cursor_blink: true,

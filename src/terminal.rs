@@ -1797,6 +1797,17 @@ impl TerminalSession {
         self.parser.screen().contents()
     }
 
+    /// Activity follows live output even while the user reads scrollback.
+    /// Do not mutate the displayed viewport to inspect the live screen.
+    pub fn live_screen_text(&self) -> String {
+        if self.parser.screen().scrollback() == 0 {
+            return self.screen_text();
+        }
+        let mut live = self.parser.screen().clone();
+        live.set_scrollback(0);
+        live.contents()
+    }
+
     pub fn visible_lines(&self) -> Vec<String> {
         let (rows, cols) = self.parser.screen().size();
         let rows = rows.get();

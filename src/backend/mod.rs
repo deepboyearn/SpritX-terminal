@@ -4,6 +4,7 @@
 //! terminal block parsing, and the remote wire protocol.
 
 pub mod config;
+pub mod cli_activity;
 pub mod files;
 pub mod git;
 pub mod history;

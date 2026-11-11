@@ -25,6 +25,15 @@ encrypted link.
 - Configurable font family and size, cursor style (block/bar/underline),
   cursor blink and scrollback length.
 - Desktop notification when a long-running command finishes.
+- A native 20px Composing orb (2.05× speed) replaces the tab's terminal icon
+  while foreground CLI activity is observed. It responds to changed live
+  screen text and submitted input, including input from remote control;
+  local typing echo and unchanged cursor/redraw updates do not keep it busy.
+  After three seconds without fresh activity the normal icon returns.
+  This is an activity estimate for arbitrary CLIs: silence is not task
+  completion. `Done`/`Failed` and completion notifications still require
+  shell-integration completion data or a process exit. A quiet computation
+  or network wait can therefore show the normal icon until output resumes.
 
 **Workspace**
 

@@ -7,45 +7,12 @@ use gpui::{
 
 use crate::components::buttons::{divider, dot, icon_button};
 use crate::components::icons::{Icon, icon};
+use crate::components::thinking_orb::thinking_orb;
 use crate::screens::app_shell::{SpritXApp, TabMenuState};
 use crate::state::SplitDirection;
 use crate::theme::{Theme, tab_bar_h};
 
 const TAB_SLIDE_DURATION: Duration = Duration::from_millis(210);
-
-pub(super) fn activity_wave(color: gpui::Hsla, reduced_motion: bool) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-            let animate = window.is_window_active() && !reduced_motion;
-            let phase = START.get_or_init(Instant::now).elapsed().as_secs_f64()
-                * std::f64::consts::TAU;
-            for index in 0..3 {
-                let lift = if animate {
-                    ((phase - f64::from(index) * 0.95).sin().max(0.0) * 2.5) as f32
-                } else {
-                    0.0
-                };
-                let dot_bounds = Bounds {
-                    origin: bounds.origin + gpui::point(px(1. + index as f32 * 5.), px(4. - lift)),
-                    size: gpui::size(px(3.), px(3.)),
-                };
-                window.paint_quad(gpui::quad(
-                    dot_bounds,
-                    gpui::Corners::all(px(1.5)),
-                    color,
-                    gpui::Edges::all(px(0.)),
-                    gpui::transparent_black(),
-                    gpui::BorderStyle::Solid,
-                ));
-            }
-            if animate {
-                window.request_animation_frame();
-            }
-        },
-    ).flex_none().w(px(15.)).h(px(9.))
-}
 
 pub(super) struct TabHighlight {
     tab_id: u64,
@@ -71,17 +38,16 @@ pub fn render(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>)
     div()
         .flex()
         .flex_none()
-        .items_center()
+        .items_end()
         .h(tab_bar_h())
-        .px(px(12.))
+        .px(px(8.))
         .gap(px(6.))
-        .border_b_1()
-        .border_color(theme.border)
+        .bg(theme.outer)
         .when(!app.file_tree_visible, |bar| bar.child(render_lead(app, cx)))
-            .child(render_tabs(app, window_active, cx))
-        .child(render_new_group(app, cx))
+        .child(render_tabs(app, window_active, cx))
+        .child(div().pb(px(4.)).child(render_new_group(app, cx)))
         .child(div().flex_1())
-        .child(render_actions(app, cx))
+        .child(div().pb(px(5.)).child(render_actions(app, cx)))
         .into_any_element()
 }
 
@@ -92,6 +58,7 @@ fn render_lead(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .flex_none()
         .items_center()
         .pr(px(4.))
+        .pb(px(5.))
         .child(
             icon_button("tb-file-tree", Icon::Sidebar, &theme, false)
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -102,10 +69,9 @@ fn render_lead(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>) -> AnyElement {
+fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
-    let light = theme.bg.l >= 0.5;
-    let selected_fill = gpui::rgb(if light { 0xffffff } else { 0x3a3a3d });
+    let selected_fill = theme.bg;
     let offset = app.tab_scroll.offset().x;
     let max_offset = app.tab_scroll.max_offset().width;
     let can_scroll_left = offset > px(1.0);
@@ -130,8 +96,9 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
         .flex()
         .min_w_0()
         .items_center()
-        .gap(px(10.))
-        .p(px(3.))
+        .gap(px(8.))
+        .px(px(8.))
+        .h(px(36.))
         .overflow_x_scroll()
         .scrollbar_width(px(0.))
         .track_scroll(&app.tab_scroll)
@@ -165,14 +132,17 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
             .map(|leaf| leaf.remote)
             .unwrap_or(false);
         let mobile = app.mobile_client_panes().iter().any(|leaf| tab.leaves.contains_key(leaf));
-        let running = tab.leaves.values().any(|leaf| leaf.activity.running);
+        let process_running = tab.leaves.values().any(|leaf| leaf.activity.running);
+        let now = Instant::now();
+        let running = tab.leaves.values().any(|leaf| leaf.activity.running
+            && app.cli_activity.get(&leaf.id).is_some_and(|activity| activity.active(now)));
         let completed = tab.leaves.values()
             .filter(|leaf| leaf.activity.exit_code.is_some())
             .max_by_key(|leaf| leaf.activity.completed)
             .and_then(|leaf| leaf.activity.exit_code);
         // A leaf with no live session and not running is dead: surface it
         // distinctly instead of looking like a healthy idle tab.
-        let dead = !running
+        let dead = !process_running
             && tab
                 .leaves
                 .values()
@@ -183,19 +153,21 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(6.))
-            .pl(px(10.))
+            .gap(px(8.))
+            .pl(px(12.))
             .pr(px(8.))
-            .min_w(px(90.))
-            .max_w(px(220.))
-            .h(px(26.))
-            .rounded(px(13.))
+            .min_w(px(132.))
+            .max_w(px(204.))
+            .h(px(36.))
+            .rounded(px(10.))
             .cursor_pointer()
             .text_size(px(12.5))
             .text_color(if active { theme.fg } else { theme.fg_dim })
             .when(active, |d| d.font_weight(FontWeight::MEDIUM))
             .when(!active, |d| {
-                d.hover(|s| s.bg(theme.white_04).text_color(theme.fg))
+                // The inset rounded surface is painted by the strip canvas.
+                // A background here would paint a second, taller hover box.
+                d.hover(|s| s.text_color(theme.fg))
             })
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 if event.click_count() >= 2 {
@@ -222,18 +194,20 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
                     cx.stop_propagation();
                     this.close_tab(index, cx);
                 }),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(10.5))
-                    .text_color(theme.fg_dim)
-                    .child(format!("{}", index + 1)),
             );
 
-        if remote {
-            tab_el = tab_el.child(icon(Icon::Remote, 11.0, theme.accent));
-        }
+        let mut leading_icon = div().flex_none().w(px(20.)).h(px(20.))
+            .flex().items_center().justify_center();
+        leading_icon = if running {
+            leading_icon.child(thinking_orb(theme.bg.l < 0.5, app.settings.reduced_motion))
+        } else {
+            leading_icon.child(icon(
+                if remote { Icon::Remote } else { Icon::Ssh },
+                14.0,
+                if active { theme.fg } else { theme.fg_dim },
+            ))
+        };
+        tab_el = tab_el.child(leading_icon);
 
         if editing {
             tab_el = tab_el.child(
@@ -268,10 +242,7 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .child(title),
-                    )
-                    .when(!active || !window_active || !app.terminal_has_focus(), |d| {
-                        d.child(dot(theme.danger, 5.).flex_none())
-                    }),
+                    ),
             );
         }
 
@@ -317,9 +288,7 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
             if mobile {
                 tab_el = tab_el.child(div().flex_none().child(icon(Icon::Smartphone, 12.0, theme.accent)));
             }
-            if running {
-                tab_el = tab_el.child(activity_wave(theme.fg_dim, app.settings.reduced_motion));
-            } else if let Some(exit_code) = completed {
+            if let Some(exit_code) = completed.filter(|_| !process_running) {
                 let (label, color) = if exit_code == 0 { ("Done", theme.success) } else { ("Failed", theme.danger) };
                 tab_el = tab_el.child(div().flex_none().text_size(px(10.)).text_color(color).child(label));
             } else if dead {
@@ -331,8 +300,10 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
                     .flex()
                     .items_center()
                     .justify_center()
-                    .p(px(2.))
-                    .rounded(px(4.))
+                    .flex_none()
+                    .w(px(20.))
+                    .h(px(20.))
+                    .rounded(px(6.))
                     .cursor_pointer()
                     .text_color(theme.fg_dim)
                     .hover(|s| s.bg(theme.white_08).text_color(theme.fg))
@@ -350,10 +321,10 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
     let scroll = app.tab_scroll.clone();
     let highlight = app.tab_highlight.clone();
     let selected_index = active_index;
+    let tab_count = app.tabs.len();
     // `active_tab_checked` is the total read path; the empty case returned
     // above, so this resolves to a real tab.
     let selected_id = app.active_tab_checked().map_or(0, |tab| tab.id);
-    let tab_count = app.tabs.len();
     if highlight.borrow().as_ref().is_none_or(|pill| pill.tab_id != selected_id) {
         scroll.scroll_to_item(selected_index);
     }
@@ -361,25 +332,22 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
         |_, _, _| (),
         move |bounds, _, window, _| {
             let offset = scroll.offset();
-            // Give each tab its own grey shell around the sliding selection.
-            // Skip this cosmetic painting once the strip is huge: calling
-            // `bounds_for_item` per tab every frame is O(n) for no visible
-            // gain off-screen. The selection pill below still paints.
-            if tab_count <= 50 {
-                for index in 0..tab_count {
-                    if let Some(mut shell) = scroll.bounds_for_item(index) {
-                        shell.origin += offset - gpui::point(px(3.), px(3.));
-                        shell.size.width += px(6.);
-                        shell.size.height += px(6.);
-                        window.paint_quad(gpui::quad(
-                            shell,
-                            gpui::Corners::all(px(16.)),
-                            theme.bg_soft,
-                            gpui::Edges::all(px(0.)),
-                            gpui::transparent_black(),
-                            gpui::BorderStyle::Solid,
-                        ));
-                    }
+            // All labels share one baseline. Inactive surfaces are inset
+            // inside the same slots rather than moving the tab contents up.
+            for index in 0..tab_count.min(50) {
+                if index == selected_index { continue; }
+                if let Some(mut surface) = scroll.bounds_for_item(index) {
+                    surface.origin += offset;
+                    surface.origin.y += px(4.);
+                    surface.size.height -= px(8.);
+                    window.paint_quad(gpui::quad(
+                        surface,
+                        gpui::Corners::all(px(8.)),
+                        theme.white_04,
+                        gpui::Edges::all(px(0.)),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::Solid,
+                    ));
                 }
             }
             let Some(mut target) = scroll.bounds_for_item(selected_index) else {
@@ -404,12 +372,46 @@ fn render_tabs(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>
             position.origin += bounds.origin + offset;
             window.paint_quad(gpui::quad(
                 position,
-                gpui::Corners::all(px(13.)),
+                gpui::Corners::all(px(10.)),
                 selected_fill,
                 gpui::Edges::all(px(0.)),
                 gpui::transparent_black(),
                 gpui::BorderStyle::Solid,
             ));
+            // Continue the rounded tab into its content surface. Paint this
+            // with the moving highlight so the connection follows selection.
+            let mut bridge = position;
+            bridge.origin.y += bridge.size.height - px(12.);
+            bridge.size.height = px(12.);
+            window.paint_quad(gpui::quad(
+                bridge,
+                gpui::Corners::all(px(0.)),
+                selected_fill,
+                gpui::Edges::all(px(0.)),
+                gpui::transparent_black(),
+                gpui::BorderStyle::Solid,
+            ));
+            // Concave shoulders soften the join without separating the tab
+            // from its terminal. Keep them inside the scroll viewport.
+            let radius = px(8.);
+            let bottom = position.origin.y + position.size.height;
+            for (edge, direction) in [
+                (position.origin.x, -1.0),
+                (position.origin.x + position.size.width, 1.0),
+            ] {
+                let mut shoulder = gpui::PathBuilder::fill();
+                shoulder.move_to(gpui::point(edge + radius * direction, bottom));
+                shoulder.cubic_bezier_to(
+                    gpui::point(edge, bottom - radius),
+                    gpui::point(edge + radius * direction * 0.448, bottom),
+                    gpui::point(edge, bottom - radius * 0.448),
+                );
+                shoulder.line_to(gpui::point(edge, bottom));
+                shoulder.close();
+                if let Ok(path) = shoulder.build() {
+                    window.paint_path(path, selected_fill);
+                }
+            }
             if now.duration_since(pill.started) < TAB_SLIDE_DURATION {
                 window.request_animation_frame();
             }
@@ -496,10 +498,9 @@ fn render_new_group(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                 .flex()
                 .items_center()
                 .justify_center()
-                .ml(px(4.))
-                .w(px(24.))
-                .h(px(24.))
-                .rounded(px(12.))
+                .w(px(28.))
+                .h(px(28.))
+                .rounded(px(8.))
                 .text_color(theme.fg_dim)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.white_08).text_color(theme.fg))

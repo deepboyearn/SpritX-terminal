@@ -375,14 +375,6 @@ pub(super) fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement
         .py(px(4.))
         .gap(px(4.))
         .overflow_y_scroll();
-    if app.recent_projects.is_empty() {
-        list = list.child(
-            div()
-                .p(px(10.))
-                .text_color(theme.fg_dim)
-                .child("Your projects will appear here"),
-        );
-    }
     for (index, entry) in app.recent_projects.iter().enumerate() {
         let open = entry.clone();
         let dismiss = entry.clone();
@@ -412,6 +404,8 @@ pub(super) fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement
             _ => "Idle".into(),
         };
         let running = activity.is_some_and(|activity| activity.running) && !ended && !disconnected;
+        let animating = running && entry.pane.and_then(|pane| app.cli_activity.get(&pane))
+            .is_some_and(|activity| activity.active(std::time::Instant::now()));
         let completed = activity.is_some_and(|activity| activity.completed > 0) && !running && !disconnected;
         let failed = completed && activity.and_then(|activity| activity.exit_code).is_some_and(|code| code != 0);
         let status_color = if disconnected || failed { theme.danger }
@@ -450,28 +444,38 @@ pub(super) fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement
             .tooltip(move |_, cx| {
                 cx.new(|_| RecentTooltip { text: tip.clone(), theme }).into()
             })
-            .child(icon(Icon::ChatBot, 14., if selected { theme.fg } else { theme.fg_dim }))
+            .child({
+                let slot = div().flex_none().size(px(20.)).flex().items_center().justify_center();
+                if animating {
+                    slot.child(crate::components::thinking_orb::thinking_orb(theme.bg.l < 0.5, app.settings.reduced_motion))
+                } else {
+                    slot.child(icon(Icon::ChatBot, 14., if selected { theme.fg } else { theme.fg_dim }))
+                }
+            })
             .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis()
                 .whitespace_nowrap().text_size(px(11.5))
                 .font_weight(gpui::FontWeight::MEDIUM).text_color(theme.fg)
                 .child(entry.name()))
-            .child(div().flex_none().w(px(1.)).h(px(10.)).bg(theme.border))
-            .child(state)
+            .when(!completed, |row| row
+                .child(div().flex_none().w(px(1.)).h(px(10.)).bg(theme.border))
+                .child(state))
             .when(running, |row| row
-                .child(div().flex_none().text_size(px(10.)).text_color(theme.fg_dim).child(elapsed_label))
-                .child(super::tab_bar::activity_wave(status_color, app.settings.reduced_motion)))
-            .when(!running && completed, |row| row.child(crate::components::buttons::dot(status_color, 4.)));
+                .child(div().flex_none().text_size(px(10.)).text_color(theme.fg_dim).child(elapsed_label)))
+            .when(completed, |row| row.child(div().flex_none().text_size(px(10.))
+                .text_color(status_color).child(if failed { "Failed" } else { "Done" })));
+        let dismiss_group = gpui::SharedString::from(format!("recent-dismiss-{index}"));
         let row = row.child(
             div()
                 .id(("dismiss-recent", index))
+                .group(dismiss_group.clone())
                 .flex().flex_none().items_center().justify_center()
-                .size(px(16.))
-                .rounded(px(4.))
-                .text_color(theme.fg_dim)
+                .size(px(18.))
+                .rounded(px(5.))
+                .text_color(gpui::rgb(0x71717a))
                 .hover(|style| {
                     style
-                        .text_color(theme.danger)
-                        .bg(theme.danger.opacity(0.08))
+                        .text_color(gpui::rgb(0xffffff))
+                        .bg(gpui::rgb(0xdc2626))
                 })
                 .tooltip(move |_, cx| {
                     cx.new(|_| RecentTooltip {
@@ -480,7 +484,11 @@ pub(super) fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement
                     })
                     .into()
                 })
-                .child(icon(Icon::X, 10., theme.fg_dim))
+                // GPUI SVGs require their own text color to paint. Parent
+                // text inheritance alone leaves the cross invisible.
+                .child(gpui::svg().path(Icon::X.path()).size(px(11.)).flex_none()
+                    .text_color(gpui::rgb(0x71717a))
+                    .group_hover(dismiss_group, |style| style.text_color(gpui::rgb(0xffffff))))
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.recent_projects.retain(|entry| {
                         entry.project != dismiss.project || entry.pane != dismiss.pane
@@ -510,9 +518,13 @@ pub(super) fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement
         .child(
             div()
                 .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(7.))
                 .px(px(10.))
                 .py(px(8.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(icon(Icon::History, 14., theme.fg_dim))
                 .child("Recent"),
         )
         .child(list)

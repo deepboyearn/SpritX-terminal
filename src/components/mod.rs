@@ -2,6 +2,7 @@ pub mod buttons;
 pub mod context_menu;
 pub mod icons;
 pub mod text_input;
+pub mod thinking_orb;
 pub mod toggle;
 
 #[allow(unused_imports)]

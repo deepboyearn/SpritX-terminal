@@ -71,6 +71,7 @@ pub struct SpritXApp {
     pub cursor_blink_epoch: std::time::Instant,
     pub file_tree_visible: bool,
     pub file_tree_width: f32,
+    pub(super) file_tree_resize_anchor: std::rc::Rc<std::cell::Cell<f32>>,
     pub file_list_collapsed: bool,
     pub(super) file_list_scroll: gpui::UniformListScrollHandle,
     pub(super) file_scroll_thumb_visible: bool,
@@ -139,6 +140,7 @@ pub struct SpritXApp {
     pub(super) owner_seen: HashMap<u64, u64>,
     pub(super) owner_activation: HashMap<u64, u64>,
     pub(super) command_started: HashMap<u64, std::time::Instant>,
+    pub(super) cli_activity: HashMap<u64, crate::backend::cli_activity::CliActivity>,
     pub(super) notification_tx: std::sync::mpsc::Sender<u64>,
     pub(super) notification_rx: std::sync::mpsc::Receiver<u64>,
 }
@@ -188,6 +190,7 @@ impl SpritXApp {
             file_tree_visible: true,
             file_tree_width: 230.0,
             // Exercise the expanded tree and its background watcher in UI smoke tests.
+            file_tree_resize_anchor: std::rc::Rc::new(std::cell::Cell::new(0.0)),
             file_list_collapsed: std::env::var("SPRITX_OPEN").as_deref() != Ok("file-tree"),
             file_list_scroll: Default::default(),
             file_scroll_thumb_visible: false,
@@ -250,6 +253,7 @@ impl SpritXApp {
             owner_seen: HashMap::new(),
             owner_activation: HashMap::new(),
             command_started: HashMap::new(),
+            cli_activity: HashMap::new(),
             notification_tx, notification_rx,
         };
         crate::terminal::set_appearance(terminal_appearance_from_config(&app_config, &app.settings_fonts));
@@ -401,6 +405,7 @@ impl SpritXApp {
     pub fn pump_terminals(&mut self) -> bool {
         let pumped = self.pump_remote();
         let mut updates = Vec::new();
+        let mut screen_changes = Vec::new();
         let mut parse_us = 0u128;
         for (leaf, session) in self.sessions.iter_mut() {
             let started = std::time::Instant::now();
@@ -413,6 +418,7 @@ impl SpritXApp {
                 server.set_modes(*leaf, session.session_modes());
             }
             if let Some(bytes) = pumped_bytes {
+                screen_changes.push((*leaf, crate::backend::cli_activity::screen_fingerprint(&session.live_screen_text())));
                 updates.push((*leaf, bytes));
             }
         }
@@ -437,6 +443,7 @@ impl SpritXApp {
                 use crate::backend::osc::OscEvent;
                 match event.event {
                     OscEvent::OutputStart => {
+                        self.cli_activity.entry(leaf).or_default().command_started();
                         self.command_started.insert(leaf, std::time::Instant::now());
                         if let Some(state) = self.leaf_mut(leaf) {
                             state.activity.running = true;
@@ -480,6 +487,11 @@ impl SpritXApp {
         let changed = had_output || !exited.is_empty() || synced;
         for (leaf, exit_code) in exited {
             self.complete_terminal_command(leaf, exit_code);
+        }
+        let now = std::time::Instant::now();
+        for (leaf, fingerprint) in screen_changes {
+            let running = self.tabs.iter().any(|tab| tab.leaves.get(&leaf).is_some_and(|state| state.activity.running));
+            self.cli_activity.entry(leaf).or_default().observe_screen(fingerprint, running, now);
         }
         if changed {
             self.refresh_remote_tabs();
@@ -849,6 +861,10 @@ impl SpritXApp {
         session.scroll_to_bottom();
         let started = std::time::Instant::now();
         let ok = session.write(bytes).is_ok();
+        if ok {
+            let running = self.tabs.iter().any(|tab| tab.leaves.get(&leaf).is_some_and(|state| state.activity.running));
+            self.cli_activity.entry(leaf).or_default().input(bytes, running, std::time::Instant::now());
+        }
         if crate::metrics::enabled() {
             let us = crate::metrics::micros(started.elapsed());
             crate::metrics::probe("key-sent", us);
@@ -1000,6 +1016,7 @@ impl SpritXApp {
         self.owner_seen.retain(|leaf, _| live.contains(leaf));
         self.owner_activation.retain(|leaf, _| live.contains(leaf));
         self.command_started.retain(|leaf, _| live.contains(leaf));
+        self.cli_activity.retain(|leaf, _| live.contains(leaf));
         self.restored_sessions.retain(|leaf, _| live.contains(leaf));
         // Dropping the last handle closes the link (see `RemoteLink::drop`), so
         // a removed pane cannot leave a reconnect loop behind.
@@ -1019,6 +1036,7 @@ impl SpritXApp {
         self.owner_seen.remove(&leaf);
         self.owner_activation.remove(&leaf);
         self.command_started.remove(&leaf);
+        self.cli_activity.remove(&leaf);
         self.restored_sessions.remove(&leaf);
         self.remote_links.remove(&leaf);
         self.remote_link_notes.remove(&leaf);
@@ -1619,10 +1637,10 @@ impl SpritXApp {
 
     fn render_body(&self, window_active: bool, cx: &mut Context<Self>) -> AnyElement {
         div()
+            .relative()
             .flex()
             .flex_1()
             .min_h_0()
-            .gap(body_pad())
             .p(body_pad())
             .when(self.file_tree_visible, |d| {
                 d.child(crate::metrics::file_tree(|| super::file_tree::render(self, cx)))
@@ -1635,13 +1653,7 @@ impl SpritXApp {
                     .min_w_0()
                     .min_h_0()
                     .rounded(px(12.))
-                    .border_1()
-                    .border_color(if self.theme.bg.l >= 0.5 {
-                        self.theme.outer
-                    } else {
-                        self.theme.border
-                    })
-                    .bg(self.theme.bg)
+                    .bg(self.theme.outer)
                     .overflow_hidden()
                     .child(crate::metrics::tab_bar(|| super::tab_bar::render(self, window_active, cx)))
                     .child(
@@ -1650,11 +1662,17 @@ impl SpritXApp {
                             .flex_col()
                             .flex_1()
                             .min_h_0()
+                            .rounded_tl(px(12.))
+                            .rounded_tr(px(12.))
+                            .bg(self.theme.bg)
                             .p(body_pad())
                             .child(super::pane_tree::render(self, cx)),
                     )
                     .child(self.render_status_hint()),
             )
+            .when(self.file_tree_visible, |body| {
+                body.child(super::file_tree::render_resize_handle(self, cx))
+            })
             .into_any_element()
     }
 
@@ -1671,6 +1689,7 @@ impl SpritXApp {
             .items_center()
             .justify_between()
             .h(px(24.))
+            .bg(theme.bg)
             .px(px(6.))
             .text_size(px(10.5))
             .text_color(theme.fg_dim)
@@ -2756,7 +2775,10 @@ impl SpritXApp {
                         if session.scroll_to_bottom() {
                             repaint = true;
                         }
-                        let _ = session.write(&bytes);
+                        if session.write(&bytes).is_ok() {
+                            let running = self.tabs.iter().any(|tab| tab.leaves.get(&leaf).is_some_and(|state| state.activity.running));
+                            self.cli_activity.entry(leaf).or_default().input(&bytes, running, std::time::Instant::now());
+                        }
                     }
                 }
                 RemoteInput::Resize { leaf, cols, rows } => {
@@ -2877,8 +2899,49 @@ pub fn tab_lifecycle_test(window: gpui::WindowHandle<SpritXApp>, cx: &mut gpui::
     cx.spawn(async move |cx| {
         window.update(cx, |app, _, cx| {
             app.next_tab_id = 13;
+            app.theme = Theme::light();
             app.add_tab(cx);
             assert_eq!(app.active_tab().title, "Terminal");
+            app.split_active_pane(SplitDirection::Row, cx);
+            assert_eq!(app.active_tab().pane_count(), 2);
+            let tab = app.active_tab_mut();
+            tab.leaves.get_mut(&tab.active_leaf).unwrap().activity.running = true;
+            let leaf = tab.active_leaf;
+            app.cli_activity.entry(leaf).or_default().input(b"\r", true, std::time::Instant::now());
+            let fixture = crate::platform::config_dir().unwrap().join("recent-ui-fixture");
+            std::fs::create_dir_all(&fixture).unwrap();
+            app.leaf_mut(leaf).unwrap().cwd = fixture.to_string_lossy().into_owned();
+            app.start_recent_work(leaf);
+            assert!(app.recent_projects.iter().any(|entry| entry.pane == Some(leaf)));
+            cx.notify();
+        }).unwrap();
+        gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        window.update(cx, |app, _, cx| {
+            app.activate_tab(0, cx);
+            assert_eq!(app.active_tab().pane_count(), 1);
+        }).unwrap();
+        gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        window.update(cx, |app, _, cx| {
+            app.activate_tab(1, cx);
+            assert_eq!(app.active_tab().pane_count(), 2);
+            // Render the compact working orb in dark/reduced-motion mode too.
+            app.theme = Theme::dark();
+            app.settings.reduced_motion = true;
+            let tab = app.active_tab_mut();
+            tab.leaves.get_mut(&tab.active_leaf).unwrap().activity.running = true;
+            let leaf = tab.active_leaf;
+            app.cli_activity.entry(leaf).or_default().input(b"\r", true, std::time::Instant::now());
+        }).unwrap();
+        gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        window.update(cx, |app, _, cx| {
+            let leaf = app.active_tab().active_leaf;
+            app.leaf_mut(leaf).unwrap().activity.running = true;
+            app.complete_terminal_command(leaf, 0);
+            assert_eq!(app.leaf_mut(leaf).unwrap().activity.exit_code, Some(0));
+            cx.notify();
+        }).unwrap();
+        gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        window.update(cx, |app, _, cx| {
             app.close_tab(1, cx);
             app.close_tab(0, cx);
             assert!(app.tabs.is_empty());

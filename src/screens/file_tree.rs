@@ -23,6 +23,7 @@ use std::cell::Cell;
 use std::fs::Metadata;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -993,7 +994,17 @@ fn flatten(dir: &DirLoad, depth: usize, expanded: &[String], rows: &mut Vec<Row>
 
 struct FileResize {
     start_width: f32,
-    anchor_x: Cell<f32>,
+    anchor_x: Rc<Cell<f32>>,
+}
+
+const RESIZE_HANDLE_WIDTH: f32 = 6.0;
+
+fn resized_file_tree_width(start: f32, anchor: f32, pointer: f32) -> f32 {
+    (start + pointer - anchor).clamp(180.0, 600.0)
+}
+
+fn resize_handle_left(width: f32) -> Pixels {
+    crate::theme::body_pad() + px(width - RESIZE_HANDLE_WIDTH / 2.0)
 }
 
 #[derive(Default)]
@@ -1277,9 +1288,8 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
         .on_drag_move::<FileResize>(cx.listener(
             |this, event: &DragMoveEvent<FileResize>, _, cx| {
                 let drag = event.drag(cx);
-                let width = (drag.start_width
-                    + (f32::from(event.event.position.x) - drag.anchor_x.get()))
-                .clamp(180.0, 600.0);
+                let width = resized_file_tree_width(drag.start_width,
+                    drag.anchor_x.get(), f32::from(event.event.position.x));
                 if (this.file_tree_width - width).abs() > 0.5 {
                     this.file_tree_width = width;
                     cx.notify();
@@ -1316,14 +1326,14 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                     .items_center()
                     .gap(px(4.))
                     .child(
-                        ft_button("workspace-search", theme)
+                        ft_button("workspace-search", theme, "Search files")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_palette(PaletteMode::Command, cx)
                             }))
                             .child(icon(Icon::Search, 14.0, theme.fg_dim)),
                     )
                     .child(
-                        ft_button("workspace-hide-sidebar", theme)
+                        ft_button("workspace-hide-sidebar", theme, "Hide sidebar")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.file_tree_visible = false;
                                 cx.notify();
@@ -1383,7 +1393,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                 .items_center()
                 .gap(px(2.))
                 .child(
-                    ft_button("ft-hidden", theme)
+                    ft_button("ft-hidden", theme, if ui.show_hidden { "Hide hidden files" } else { "Show hidden files" })
                         .on_click(cx.listener(|this, _, _, cx| {
                             let mut ui = ft_ui(this);
                             ui.show_hidden = !ui.show_hidden;
@@ -1410,7 +1420,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                         ),
                 )
                 .child(
-                    ft_button("ft-refresh", theme)
+                    ft_button("ft-refresh", theme, "Reload files")
                         .on_click(cx.listener(|this, _, _, cx| {
                             let mut ui = ft_ui(this);
                             ui.refresh = ui.refresh.wrapping_add(1);
@@ -1420,7 +1430,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                         .child(icon(Icon::Refresh, 12.0, theme.fg_dim)),
                 )
                 .child(
-                    ft_button("ft-toggle-file-list", theme)
+                    ft_button("ft-toggle-file-list", theme, if app.file_list_collapsed { "Show files" } else { "Hide files" })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.file_list_collapsed = !this.file_list_collapsed;
                             this.file_scroll_thumb_visible = false;
@@ -1438,7 +1448,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                         )),
                 )
                 .child(
-                    ft_button("ft-close", theme)
+                    ft_button("ft-close", theme, "Close sidebar")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.file_tree_visible = false;
                             this.file_tree_ui = None;
@@ -1606,38 +1616,39 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
             .child(render_ft_menu(app, &name, &path, is_dir, theme, cx));
     }
 
-    // --- resize handle ------------------------------------------------------
-    let start_width = app.file_tree_width;
-    panel = panel.child(
-        div()
-            .id("file-tree-resize")
-            .absolute()
-            .right(px(0.))
-            .top(px(0.))
-            .bottom(px(0.))
-            .w(px(6.))
-            .cursor_col_resize()
-            .on_click(
-                cx.listener(|this, event: &gpui::ClickEvent, _: &mut gpui::Window, cx| {
-                    if event.click_count() >= 2 {
-                        this.file_tree_width = 240.0;
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_drag(
-                FileResize {
-                    start_width,
-                    anchor_x: Cell::new(0.0),
-                },
-                |drag, _, window, cx| {
-                    drag.anchor_x.set(f32::from(window.mouse_position().x));
-                    cx.new(|_| FileTreeDragGhost)
-                },
-            ),
-    );
-
     panel.into_any_element()
+}
+
+// Painted after the terminal at the shared edge, outside the sidebar's clip.
+// The hit target straddles both surfaces without reserving a visual gutter.
+pub(super) fn render_resize_handle(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
+    let start_width = app.file_tree_width;
+    // Keep the press coordinate across repaints before GPUI starts the drag.
+    let anchor = app.file_tree_resize_anchor.clone();
+    let mouse_anchor = anchor.clone();
+    div()
+        .id("file-tree-resize")
+        .absolute()
+        .left(resize_handle_left(start_width))
+        .top(crate::theme::body_pad())
+        .bottom(crate::theme::body_pad())
+        .w(px(RESIZE_HANDLE_WIDTH))
+        .cursor_col_resize()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, move |event, _, _| {
+            mouse_anchor.set(f32::from(event.position.x));
+        })
+        .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+            if event.click_count() >= 2 {
+                this.file_tree_width = 240.0;
+                cx.notify();
+            }
+        }))
+        .on_drag(
+            FileResize { start_width, anchor_x: anchor },
+            |_, _, _, cx| cx.new(|_| FileTreeDragGhost),
+        )
+        .into_any_element()
 }
 
 fn ft_note(theme: Theme, depth: usize, text: &str) -> AnyElement {
@@ -1818,7 +1829,20 @@ fn file_tree_row(
     tail.into_any_element()
 }
 
-fn ft_button(id: &'static str, theme: Theme) -> gpui::Stateful<gpui::Div> {
+struct FileTreeTooltip {
+    label: &'static str,
+    theme: Theme,
+}
+
+impl Render for FileTreeTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().px(px(8.)).py(px(6.)).rounded(px(7.))
+            .bg(self.theme.bg).border_1().border_color(self.theme.border)
+            .text_size(px(11.)).text_color(self.theme.fg).child(self.label)
+    }
+}
+
+fn ft_button(id: &'static str, theme: Theme, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex()
@@ -1832,6 +1856,29 @@ fn ft_button(id: &'static str, theme: Theme) -> gpui::Stateful<gpui::Div> {
         .cursor_pointer()
         .text_color(theme.fg_dim)
         .hover(|s| s.bg(theme.white_08).text_color(theme.fg))
+        .tooltip(move |_, cx| cx.new(|_| FileTreeTooltip { label, theme }).into())
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    #[test]
+    fn handle_is_centered_on_the_shared_container_edge() {
+        for width in [180.0, 240.0, 420.0, 600.0] {
+            assert_eq!(resize_handle_left(width) + px(RESIZE_HANDLE_WIDTH / 2.0),
+                crate::theme::body_pad() + px(width));
+        }
+    }
+
+    #[test]
+    fn dragging_tracks_pointer_distance_without_a_gutter_offset() {
+        assert_eq!(resized_file_tree_width(240., 248., 248.), 240.);
+        assert_eq!(resized_file_tree_width(240., 248., 268.), 260.);
+        assert_eq!(resized_file_tree_width(240., 248., 228.), 220.);
+        assert_eq!(resized_file_tree_width(240., 248., 100.), 180.);
+        assert_eq!(resized_file_tree_width(240., 248., 900.), 600.);
+    }
 }
 
 fn ft_ctx_backdrop(cx: &mut Context<SpritXApp>) -> AnyElement {

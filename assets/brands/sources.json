@@ -1,0 +1,28 @@
+[
+  {
+    "file": "Codex.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/ea434b96e75813517b377825e01c0df61dee8836/packages/static-svg/icons/codex-color.svg",
+    "sha256": "4a2f43ce46b5b6e3722c95088f88d26ef91e6a8c2e598e70642a1c54367386e4"
+  },
+  {
+    "file": "Claude.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/ea434b96e75813517b377825e01c0df61dee8836/packages/static-svg/icons/claudecode-color.svg",
+    "sha256": "670b3d8d749d0815ad8f7e62a59d51cb5e2053cb19403f3541a8aed7036a877f"
+  },
+  {
+    "file": "Pi.svg",
+    "source": "https://pi.dev/logo-auto.svg",
+    "sha256": "abd66e7868b2d24f0f0895f9237ee8a6dcb22337583b0dc54aeb595acecb4d6b"
+  },
+  {
+    "file": "Omp.svg",
+    "source": "https://raw.githubusercontent.com/can1357/oh-my-pi/50da2d357039404a81d7c64622740ce13e4c54b4/assets/icon.svg",
+    "sha256": "727019727006f26fe3d1f187d3fe9830f26213733a51721096a2044ab059cf61"
+  },
+  {
+    "file": "OpenCode.svg",
+    "source": "../icons/CliOpenCode.svg",
+    "derivation": "Existing LobeHub monochrome mark with currentColor resolved to its published black ink.",
+    "sha256": "40ecc38689a83d6c436a236fee058dbea02cf4ac751a14ec55f6cf0a8f73aab8"
+  }
+]

@@ -1,0 +1,3 @@
+# Preserve the source SVG hashes and PNG artwork across Windows/Linux checkouts.
+*.svg -text
+*.png binary

@@ -1,4 +1,4 @@
-//! Bakes `assets/icons/*.svg` into the binary.
+//! Bakes monochrome SVG icons and full-color brand PNGs into the binary.
 //!
 //! The UI draws its icons through GPUI's asset source. A packaged SpritX (deb,
 //! rpm, Arch package, Flatpak, AppImage) is a bare binary with no source tree
@@ -33,6 +33,23 @@ fn main() {
         // include would resolve against the wrong directory.
         table.push_str(&format!(
             "    ({stem:?}, include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/icons/{file}\"))),\n"
+        ));
+    }
+    table.push_str("];\n");
+
+    let brand_dir = Path::new("assets/brands");
+    println!("cargo:rerun-if-changed={}", brand_dir.display());
+    let mut brands: Vec<String> = fs::read_dir(brand_dir)
+        .expect("assets/brands ships with the repository")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".png"))
+        .collect();
+    brands.sort();
+    table.push_str("pub static BRAND_IMAGES: &[(&str, &[u8])] = &[\n");
+    for file in brands {
+        table.push_str(&format!(
+            "    (\"brands/{file}\", include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/brands/{file}\"))),\n"
         ));
     }
     table.push_str("];\n");

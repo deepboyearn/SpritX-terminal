@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, svg, AnyElement, ClipboardItem, Context, IntoElement, MouseButton,
+    div, prelude::*, px, AnyElement, ClipboardItem, Context, IntoElement, MouseButton,
 };
 
 use crate::backend::config::{AppConfig, CliLauncherConfig};
@@ -18,40 +18,40 @@ use super::app_shell::SpritXApp;
 struct Brand {
     command: &'static str,
     label: &'static str,
-    svg: &'static str,
-    tint: u32,
+    image: &'static str,
+    background: u32,
 }
 
 const BRANDS: &[Brand] = &[
     Brand {
         command: "codex",
         label: "Codex",
-        svg: "icons/CliCodex.svg",
-        tint: 0x6559cd,
+        image: "brands/Codex.png",
+        background: 0xffffff,
     },
     Brand {
         command: "claude",
         label: "Claude Code",
-        svg: "icons/CliClaude.svg",
-        tint: 0xb85134,
+        image: "brands/Claude.png",
+        background: 0xffffff,
     },
     Brand {
         command: "opencode",
         label: "OpenCode",
-        svg: "icons/CliOpenCode.svg",
-        tint: 0x657084,
+        image: "brands/OpenCode.png",
+        background: 0xffffff,
     },
     Brand {
         command: "pi",
         label: "Pi",
-        svg: "icons/CliPi.svg",
-        tint: 0x557453,
+        image: "brands/Pi.png",
+        background: 0xffffff,
     },
     Brand {
         command: "omp",
         label: "Oh My Pi",
-        svg: "icons/CliOmp.svg",
-        tint: 0x9b5b33,
+        image: "brands/Omp.png",
+        background: 0x0d0d0d,
     },
 ];
 
@@ -674,7 +674,6 @@ fn logo(
     let enabled = tool
         .as_ref()
         .is_some_and(|tool| !app.cli_launcher.config.hidden.contains(&tool.path));
-    let tint: gpui::Hsla = gpui::rgb(brand.tint).into();
     let tooltip = if enabled {
         brand.label.to_string()
     } else {
@@ -697,11 +696,12 @@ fn logo(
         .size(px(30.))
         .rounded(px(7.))
         .cursor_pointer()
-        .bg(tint.opacity(if enabled { 0.12 } else { 0.05 }))
-        .hover(|style| style.bg(tint.opacity(0.20)))
-        .child(svg().path(brand.svg).size(px(17.)).text_color(
-            if theme.bg.l < 0.5 { theme.fg } else { tint }.opacity(if enabled { 1. } else { 0.45 }),
-        ))
+        // Brand art and its contrast plate stay identical in both themes.
+        // Unlike GPUI's monochrome SVG mask, an image retains original fills.
+        .bg(gpui::rgb(brand.background))
+        .border_1().border_color(theme.white_08)
+        .hover(|style| style.border_color(theme.fg_dim))
+        .child(gpui::img(brand.image).size(px(20.)).flex_none())
         .tooltip(move |_, cx| {
             cx.new(|_| LogoTooltip {
                 text: tooltip.clone(),

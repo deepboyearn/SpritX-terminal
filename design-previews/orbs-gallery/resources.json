@@ -1,0 +1,621 @@
+{
+  "repository": "https://github.com/Jakubantalik/Libraries.dev",
+  "revision": "387b049ca8fe97b5d72999b5bf61a19ab1ccff81",
+  "files": [
+    {
+      "path": "LICENSE",
+      "git_blob_sha": "0e9405a2ee75ce720c665c04568fedda3c07906a",
+      "bytes": 1070
+    },
+    {
+      "path": "packages/thinking-orbs/.npmignore",
+      "git_blob_sha": "41615bf43c3ea035f5e25deee788c7dc4b8953a3",
+      "bytes": 87
+    },
+    {
+      "path": "packages/thinking-orbs/LICENSE",
+      "git_blob_sha": "0e9405a2ee75ce720c665c04568fedda3c07906a",
+      "bytes": 1070
+    },
+    {
+      "path": "packages/thinking-orbs/PORT_PLAN.md",
+      "git_blob_sha": "57ca463e0580c483eeb27787c57651aa7c9f4836",
+      "bytes": 20219
+    },
+    {
+      "path": "packages/thinking-orbs/README.md",
+      "git_blob_sha": "5b2c0842d55d339b14e3ba49109bac4835551001",
+      "bytes": 3426
+    },
+    {
+      "path": "packages/thinking-orbs/biome.json",
+      "git_blob_sha": "05a058b624dbee6950add6f966427ac6c3aeceff",
+      "bytes": 1100
+    },
+    {
+      "path": "packages/thinking-orbs/package.json",
+      "git_blob_sha": "e0149b04085cfa6299287a8f4ae47ebe0bd4bf97",
+      "bytes": 1924
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/.gitignore",
+      "git_blob_sha": "ca2695b4cfbf0938db78bfce0ea8a72914408522",
+      "bytes": 135
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/PillsDemo/Resources/wallpaper.png",
+      "git_blob_sha": "2b47f724173d502a32ffc1553bd382d0bab9a751",
+      "bytes": 916776
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/PillsDemo/Sources/BackdropBlur.swift",
+      "git_blob_sha": "d557c176f6dcdbef4e84e8868152fb61567201c1",
+      "bytes": 2094
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/PillsDemo/Sources/BuildStamp.swift",
+      "git_blob_sha": "1dd3e5b28392f9f8323df7761b7714e5e5f7d8a1",
+      "bytes": 783
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/PillsDemo/Sources/PillsApp.swift",
+      "git_blob_sha": "1d33a18b2950bf70e01127a69e1bb6a633636764",
+      "bytes": 55605
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/PillsDemo/Sources/Wallpaper.swift",
+      "git_blob_sha": "7e06a0278ed5fc6a37d4845c3db14b27f5f24988",
+      "bytes": 709
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/PillsDemo/project.yml",
+      "git_blob_sha": "c223175fc2134d9fee8e1d86bce0fd377089bedc",
+      "bytes": 1198
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/PillsDemo/run-device.sh",
+      "git_blob_sha": "18ea369a1b38c65dd07983b70d1ef27605113de8",
+      "bytes": 2810
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/PillsDemo/run.sh",
+      "git_blob_sha": "de816355130288a3ed3734430f7866099e4b1c5e",
+      "bytes": 1684
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsDemo/Sources/DemoApp.swift",
+      "git_blob_sha": "d376109527bdce821e56eb1890b79f6c1adaf368",
+      "bytes": 3132
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsDemo/project.yml",
+      "git_blob_sha": "f0acb98a3ba45bacd01a5af9d960437e037a0d31",
+      "bytes": 834
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsDemo/run.sh",
+      "git_blob_sha": "e20a77c9093358e0dd5490a6bf9dc041bad9ed68",
+      "bytes": 928
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Package.swift",
+      "git_blob_sha": "34460994994a19d0af523ef37d6f8f2cdbe99986",
+      "bytes": 429
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/README.md",
+      "git_blob_sha": "d4ea64fd16a338885a540e87d3dcef4a529ae9b4",
+      "bytes": 5057
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/Core.swift",
+      "git_blob_sha": "d74f149c0708a932256faad9b8125fbb17ab12fb",
+      "bytes": 4951
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/Lattice.swift",
+      "git_blob_sha": "fab4186ab789ed2f0788c3d03f074d3ab05d7d5e",
+      "bytes": 8018
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/Morph.swift",
+      "git_blob_sha": "05a8476417bb2b90a1949f26e58a52dc9b20ae5c",
+      "bytes": 4418
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/OrbSpec.swift",
+      "git_blob_sha": "17d6c8c3ce8cb5df6f8aa01bcbc5ba0d17207331",
+      "bytes": 5918
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/Orbits.swift",
+      "git_blob_sha": "719b9c82e804c2c90c7fd482382be7a8f3f8e5fe",
+      "bytes": 2738
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/Presets.swift",
+      "git_blob_sha": "a137a8b7eace6c9b22973346fdb0489454854c7f",
+      "bytes": 3375
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/Snapshot.swift",
+      "git_blob_sha": "b6ca3134e8783b5f159b7caadcb2e98e5d3979e6",
+      "bytes": 1687
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/Strands.swift",
+      "git_blob_sha": "be26dfa034f76c4111cd6cb20e20e4e6b43c06dc",
+      "bytes": 6094
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/ThinkingOrb.swift",
+      "git_blob_sha": "cb2195bf113677805d9c9f0c10c3ed0ccc8e91bb",
+      "bytes": 5590
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Sources/ThinkingOrbsKit/Web.swift",
+      "git_blob_sha": "f3926db0012ec0ced4235977312800bea50af653",
+      "bytes": 3630
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Tests/ThinkingOrbsKitTests/OrbGoldenTests.swift",
+      "git_blob_sha": "044545df52be276402a11b45ac685640af60ee96",
+      "bytes": 6316
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Tests/ThinkingOrbsKitTests/OrbPerformanceTests.swift",
+      "git_blob_sha": "50bd71ffea0fe4fd8b7dea6126dcb4cb310eef77",
+      "bytes": 1831
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/Tests/ThinkingOrbsKitTests/OrbSnapshotTests.swift",
+      "git_blob_sha": "8d1d0639d99f6af7b8ac5128f7cb3e35d931f4dc",
+      "bytes": 2277
+    },
+    {
+      "path": "packages/thinking-orbs/ports/ios/ThinkingOrbsKit/snapshot.sh",
+      "git_blob_sha": "ed3b7d60dfc9c25213d480b421b796e542215f3a",
+      "bytes": 700
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/.gitignore",
+      "git_blob_sha": "bfa32f9e064f300d015a7a452efe5251da8d22dd",
+      "bytes": 47
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/App.tsx",
+      "git_blob_sha": "ee6c1fb5170505f8529dfe51d9e772baa98c662a",
+      "bytes": 34143
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/README.md",
+      "git_blob_sha": "7e42e98a62a4e12c146400aea8340044a2ec0cf3",
+      "bytes": 2482
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/ShimmerText.tsx",
+      "git_blob_sha": "a7ca01b929ad8774cb72c463ef21d35d0889fae9",
+      "bytes": 6609
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/app.json",
+      "git_blob_sha": "29a050edc0cc8a9f81d95f5b7ce29b2dd0131fba",
+      "bytes": 410
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/assets/close.svg",
+      "git_blob_sha": "22a8848ca7d205a7c5b529659e93d44a414b5ad3",
+      "bytes": 389
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/babel.config.js",
+      "git_blob_sha": "5599ac0fb2f8ecfb1eaab6066b3b81261544b4ab",
+      "bytes": 401
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/index.ts",
+      "git_blob_sha": "ce8f2073fba50ce72b7845fbba09f1a201574548",
+      "bytes": 101
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/metro.config.js",
+      "git_blob_sha": "7d048780a775f5cfbaa2948c8740e249097ff2ce",
+      "bytes": 1289
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/package-lock.json",
+      "git_blob_sha": "4c861ce9e257922f2bc4f84cded7da15378a20a3",
+      "bytes": 314789
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/package.json",
+      "git_blob_sha": "8bcc26642a8b5953895768b37145bf7710d48a8a",
+      "bytes": 742
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/example/tsconfig.json",
+      "git_blob_sha": "1b00df57cbf53d4802749ec848bd4b4b1738fc33",
+      "bytes": 381
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/run-example.sh",
+      "git_blob_sha": "fc631319f161c9dda556c4c8dacb24b7a895fd0a",
+      "bytes": 3084
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/.gitignore",
+      "git_blob_sha": "7b69f0920428f4a01e026e0dcacf2181e77d91eb",
+      "bytes": 83
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/README.md",
+      "git_blob_sha": "4130e3966df301b829936117935cc08c106ecbd6",
+      "bytes": 4823
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/package-lock.json",
+      "git_blob_sha": "6ee6c8ec3a788aa82f144bace71a32a04d827423",
+      "bytes": 299366
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/package.json",
+      "git_blob_sha": "ea3c03c7b265787816f612d90ec522dd970f28fd",
+      "bytes": 1490
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/scripts/diff-png.mjs",
+      "git_blob_sha": "8b54e58208ea41ae162b983c58870326fb41ce7e",
+      "bytes": 2803
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/scripts/render-canvaskit.mjs",
+      "git_blob_sha": "c4e607c7e162d1bc016162195b2c05eada6a3621",
+      "bytes": 3153
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/scripts/verify-golden.mjs",
+      "git_blob_sha": "eedd41a93e7215c71e9183ff3ab147195b9a23c0",
+      "bytes": 2814
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/src/ThinkingOrb.tsx",
+      "git_blob_sha": "fa2b6af3ec6506910784c1c757249591c6703bfd",
+      "bytes": 5747
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/src/index.ts",
+      "git_blob_sha": "d3928c158aa67d4fdee3a393c5a98dd203aaa0c3",
+      "bytes": 430
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/src/theme.ts",
+      "git_blob_sha": "d67dc0b7ec4ead5d71c70f32779c3984a523b11c",
+      "bytes": 2128
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/src/types.ts",
+      "git_blob_sha": "abd302e560d7c23ca1d039ac1318dbf383809854",
+      "bytes": 1639
+    },
+    {
+      "path": "packages/thinking-orbs/ports/react-native/thinking-orbs-native/tsconfig.json",
+      "git_blob_sha": "3d0a96d79e695c210924f2b3b10e40f985e596c9",
+      "bytes": 431
+    },
+    {
+      "path": "packages/thinking-orbs/scripts/codegen-swift.ts",
+      "git_blob_sha": "8a855939851415304c29fb42b6ce7429faa49fd7",
+      "bytes": 3959
+    },
+    {
+      "path": "packages/thinking-orbs/scripts/extract-golden.ts",
+      "git_blob_sha": "5f2588464e7643cd1e6573f6f14e89dddb76c71f",
+      "bytes": 3469
+    },
+    {
+      "path": "packages/thinking-orbs/scripts/extract-spec.ts",
+      "git_blob_sha": "1b8e8cdba7c206a3a7c8f0d7e5637c53cc9f9d2d",
+      "bytes": 4358
+    },
+    {
+      "path": "packages/thinking-orbs/spec/orbs-golden.json",
+      "git_blob_sha": "838dbf60daa1fb230482a867142131114076c88b",
+      "bytes": 625283
+    },
+    {
+      "path": "packages/thinking-orbs/spec/orbs-spec.json",
+      "git_blob_sha": "896523813559c107dc17a6632f176d83b74e1ddc",
+      "bytes": 7150
+    },
+    {
+      "path": "packages/thinking-orbs/src/ThinkingOrb.tsx",
+      "git_blob_sha": "938606b422e7268232a0a6ca3675b17775747c7d",
+      "bytes": 5765
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/braid.ts",
+      "git_blob_sha": "dd670a694bb40105016024e53d0d980134c3acf0",
+      "bytes": 1952
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/core.ts",
+      "git_blob_sha": "ee10dfa82c1a8a74f971970ef7fdfbe4cfebc1f5",
+      "bytes": 6343
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/index.ts",
+      "git_blob_sha": "6f8139586cca86a229d1c9bbd29b0e781e43613a",
+      "bytes": 1476
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/lattice.ts",
+      "git_blob_sha": "f4f9126cb6205b6097835d5ba1107597f5d8a11c",
+      "bytes": 7347
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/morph.ts",
+      "git_blob_sha": "f7632f122cb81ead59e8a0123d32541aad5307e2",
+      "bytes": 4596
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/orbits.ts",
+      "git_blob_sha": "78861970ca4596d24af35f509d51745bf991336c",
+      "bytes": 2556
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/profiles.ts",
+      "git_blob_sha": "8517ed23c357551178985343ffcda2b86f333fe0",
+      "bytes": 4846
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/registry.ts",
+      "git_blob_sha": "d62524b35720cbc4830a92ac7aa8126ac0ee0857",
+      "bytes": 1397
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/ribbon.ts",
+      "git_blob_sha": "0b0734cab7dc43e37501ce4cabea19e4cb492c4c",
+      "bytes": 4070
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/types.ts",
+      "git_blob_sha": "e7b5dc53510f0e14ac3b0276ff45082fece737e3",
+      "bytes": 850
+    },
+    {
+      "path": "packages/thinking-orbs/src/engine/web.ts",
+      "git_blob_sha": "7ffa137ac923ae504202567f2b3391da5ba66859",
+      "bytes": 3428
+    },
+    {
+      "path": "packages/thinking-orbs/src/gravity.ts",
+      "git_blob_sha": "0ef4a10e30805f7e59e487750bb6d9ca2e4e0f8f",
+      "bytes": 33454
+    },
+    {
+      "path": "packages/thinking-orbs/src/index.ts",
+      "git_blob_sha": "57c052aac7c45818db223a926159df582e90a6f9",
+      "bytes": 1120
+    },
+    {
+      "path": "packages/thinking-orbs/src/presets.ts",
+      "git_blob_sha": "d366ce711b80da1192fdcc03328d302f726f36f1",
+      "bytes": 3985
+    },
+    {
+      "path": "packages/thinking-orbs/src/theme.ts",
+      "git_blob_sha": "6f1c744a68a56cf4726a97b180d3e5db9c25362f",
+      "bytes": 2665
+    },
+    {
+      "path": "packages/thinking-orbs/src/types.ts",
+      "git_blob_sha": "3fab13a39cdf20dcfc75a05681bbf29c6a688156",
+      "bytes": 5339
+    },
+    {
+      "path": "packages/thinking-orbs/tsconfig.build.json",
+      "git_blob_sha": "b059040831d7991d3d2a87c4e99017eecca4ce84",
+      "bytes": 297
+    },
+    {
+      "path": "packages/thinking-orbs/tsconfig.json",
+      "git_blob_sha": "245b5c8814b9ba53184690e6691c4a7e16796840",
+      "bytes": 475
+    },
+    {
+      "path": "packages/thinking-orbs/vite.config.ts",
+      "git_blob_sha": "f95618e43c9064d677d046dbc11fe07deb5fb5e5",
+      "bytes": 1425
+    },
+    {
+      "path": "sites/home/orbs-carousel.html",
+      "git_blob_sha": "367e3cf895a9060d618e0456fda0bd21de5cbcb7",
+      "bytes": 6731
+    },
+    {
+      "path": "sites/home/orbs.html",
+      "git_blob_sha": "07b401a1c08843d254a432155e9db60280eb4a71",
+      "bytes": 42634
+    },
+    {
+      "path": "sites/home/public/llms/thinking-orbs.md",
+      "git_blob_sha": "71540116c2578e756c7ee8f5ff39ecc417f4f2d1",
+      "bytes": 13339
+    },
+    {
+      "path": "sites/home/src/orbs-carousel.tsx",
+      "git_blob_sha": "2f82bc05198c752ed453b53be63fc44d86160598",
+      "bytes": 11593
+    },
+    {
+      "path": "sites/home/src/orbs.tsx",
+      "git_blob_sha": "f3f20895e26780fcf12f8a3c30c5deb15e300b48",
+      "bytes": 9347
+    },
+    {
+      "path": "sites/orbs/App.tsx",
+      "git_blob_sha": "308590a90610edb180b1e080ef880d1fc86050e7",
+      "bytes": 4329
+    },
+    {
+      "path": "sites/orbs/SimpleApp.tsx",
+      "git_blob_sha": "e4edd67907d6c6a059621a2d708629c53f27c451",
+      "bytes": 2078
+    },
+    {
+      "path": "sites/orbs/components/CopyButton.tsx",
+      "git_blob_sha": "715098d265af0060166f143ef93fac6f0f066961",
+      "bytes": 1285
+    },
+    {
+      "path": "sites/orbs/components/Examples.tsx",
+      "git_blob_sha": "5d7e5a3b8488f8c764849c6489712d84ba3cce7b",
+      "bytes": 4416
+    },
+    {
+      "path": "sites/orbs/components/Footer.tsx",
+      "git_blob_sha": "b040bf9f89f365ae140e0b2ed150a0dbd4622d81",
+      "bytes": 737
+    },
+    {
+      "path": "sites/orbs/components/Header.tsx",
+      "git_blob_sha": "b56b6182ba585d28ea6d03f42669727258a5bfdb",
+      "bytes": 4718
+    },
+    {
+      "path": "sites/orbs/components/PlayPauseToggle.tsx",
+      "git_blob_sha": "8b2492421f0872e87b18d7a9378d62f64acf8149",
+      "bytes": 1255
+    },
+    {
+      "path": "sites/orbs/components/Playground.tsx",
+      "git_blob_sha": "58c95320a5a06485d7035b8837efb026d4b30de3",
+      "bytes": 5203
+    },
+    {
+      "path": "sites/orbs/components/TabBtn.tsx",
+      "git_blob_sha": "e651d38f43b3d236c3592f39ac1023b4938c692d",
+      "bytes": 1043
+    },
+    {
+      "path": "sites/orbs/components/icons.tsx",
+      "git_blob_sha": "34415831494cbd48fb7c1639116ae940f39b5af4",
+      "bytes": 3810
+    },
+    {
+      "path": "sites/orbs/demo/index.html",
+      "git_blob_sha": "df2c7eb75b82b4670cd8ecf1e54f134052da9c25",
+      "bytes": 890
+    },
+    {
+      "path": "sites/orbs/hooks/useTheme.ts",
+      "git_blob_sha": "aa5c0bd45c4851ee1b3c3f2c034f7d16f6c8a7e8",
+      "bytes": 378
+    },
+    {
+      "path": "sites/orbs/index.html",
+      "git_blob_sha": "da50a4b1070bac79b20d775931e1eab4f4b56483",
+      "bytes": 9375
+    },
+    {
+      "path": "sites/orbs/lib/platforms.ts",
+      "git_blob_sha": "9a4dc2dfa650a79d42d5a6350a1fb5b4ee80497d",
+      "bytes": 2573
+    },
+    {
+      "path": "sites/orbs/lib/utils.ts",
+      "git_blob_sha": "9ad0df4269e6fd3b864ca5c7d8b68e47c3b010c2",
+      "bytes": 169
+    },
+    {
+      "path": "sites/orbs/main.tsx",
+      "git_blob_sha": "777130b721bca465e667a275a3c9f4655f6cc9c3",
+      "bytes": 214
+    },
+    {
+      "path": "sites/orbs/package.json",
+      "git_blob_sha": "663f7aea9e277f67b4d2f8a15a896994a8c6f2d2",
+      "bytes": 593
+    },
+    {
+      "path": "sites/orbs/parity.html",
+      "git_blob_sha": "2d83478861008919c365e98147df670aeba4b5ca",
+      "bytes": 477
+    },
+    {
+      "path": "sites/orbs/parity.ts",
+      "git_blob_sha": "e4cc184bb8ffbc70d12a41dfe0157e307eef1e3b",
+      "bytes": 3970
+    },
+    {
+      "path": "sites/orbs/public/favicon.png",
+      "git_blob_sha": "cb5a89bd95d8834694e1f94698f35d4516b4202a",
+      "bytes": 3247
+    },
+    {
+      "path": "sites/orbs/public/header.png",
+      "git_blob_sha": "a504f38b0885ad6af80ea11ab843a790a916bc59",
+      "bytes": 59633
+    },
+    {
+      "path": "sites/orbs/simple-main.tsx",
+      "git_blob_sha": "e841db5f45efcc213c4cfda107cdab82e1b129d2",
+      "bytes": 289
+    },
+    {
+      "path": "sites/orbs/simple.css",
+      "git_blob_sha": "fc7d03fbecf8c21c2f4229f106a221b0488014fd",
+      "bytes": 1578
+    },
+    {
+      "path": "sites/orbs/simple.html",
+      "git_blob_sha": "8d97250a399301878ed5c1d3701206ce00c25a69",
+      "bytes": 341
+    },
+    {
+      "path": "sites/orbs/styles.css",
+      "git_blob_sha": "b49c3748ab5d12ef5375741dba9940fc67c3c70e",
+      "bytes": 3740
+    },
+    {
+      "path": "sites/orbs/tailwind.css",
+      "git_blob_sha": "6938de1437db9de079e94215bffc0fda53b598c7",
+      "bytes": 4576
+    },
+    {
+      "path": "sites/orbs/tsconfig.json",
+      "git_blob_sha": "261cb45dd36fba2a1824978cf2e21428668a6b1c",
+      "bytes": 772
+    },
+    {
+      "path": "sites/orbs/vite.config.ts",
+      "git_blob_sha": "65ded238f36c74ca2f498bb9d5dd257081918db5",
+      "bytes": 1363
+    },
+    {
+      "path": "skills/libraries-dev/references/02-thinking-orbs.md",
+      "git_blob_sha": "becc4f0e5022ae9dd5ed187ed443b97a451857d9",
+      "bytes": 13204
+    },
+    {
+      "path": "sites/home/public/assets/site.css",
+      "git_blob_sha": "7a740cd7410e73fd7153ef532674c5b358cabc19",
+      "bytes": 63193
+    },
+    {
+      "path": "sites/home/public/assets/nav-products.css",
+      "git_blob_sha": "b44581e9485de58898e1a74e90f3d6dcc199c53e",
+      "bytes": 4167
+    },
+    {
+      "path": "sites/home/public/assets/playground.css",
+      "git_blob_sha": "e6f9a5e3daace1146a150540c2e4f1a67927cb94",
+      "bytes": 98308
+    },
+    {
+      "path": "sites/home/public/assets/examples.css",
+      "git_blob_sha": "ef8f177f5ae12fd040c504f788c124a1fae836db",
+      "bytes": 44539
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+# Preserve the exact upstream bytes recorded in resources.json on every OS.
+upstream/** -text

@@ -472,7 +472,7 @@ Remove-Item Env:SPRITX_UI_TESTS
 
 Setting `SPRITX_UI_TESTS=1` alone does **not** unignore the other display tests. Some process-control tests need optional external runtimes such as Node/npm/Bun; inspect their test prerequisites before running them.
 
-CI runs the default test suite on **Ubuntu and Windows** for pushes and pull requests. GUI, physical phone and distribution-specific tray behavior need separate live verification; a default CI pass does not imply all of those scenarios ran. Existing verification notes are in [BUGFIX-VALIDATION.md](BUGFIX-VALIDATION.md) and [TAB-SMOOTHNESS-REPORT.md](TAB-SMOOTHNESS-REPORT.md).
+All GitHub Actions workflows are **manual only**: pushes and pull requests do not start tests, builds or releases. From the Actions tab, run **tests** on Ubuntu and Windows first, optionally run **build**, then run **release** on the same commit. Release requires successful tests for that exact commit. GUI, physical phone and distribution-specific tray behavior need separate live verification; a default CI pass does not imply all of those scenarios ran. Existing verification notes are in [BUGFIX-VALIDATION.md](BUGFIX-VALIDATION.md) and [TAB-SMOOTHNESS-REPORT.md](TAB-SMOOTHNESS-REPORT.md).
 
 ### Runtime diagnostics
 

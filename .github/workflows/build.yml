@@ -1,7 +1,7 @@
 # Compile check — builds only, runs no tests, and is started by hand.
 #
-# `test.yml` already builds the crate as part of running the suite on every
-# push; this is the quicker "does it still compile, and are the UI icons really
+# `test.yml` already builds the crate when the suite is started manually;
+# this is the quicker "does it still compile, and are the UI icons really
 # inside the binary?" button for when you do not want to wait for the tests.
 #
 # Start it from Actions → build → Run workflow, optionally narrowing the profile.

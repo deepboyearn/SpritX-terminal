@@ -1,4 +1,4 @@
-# Builds and tests SpritX on every push (and on demand from the Actions tab).
+# Builds and tests SpritX only when started manually from the Actions tab.
 #
 # System libraries first: GPUI's X11 backend links libxkbcommon (+libxkbcommon-x11)
 # and libxcb, its Wayland backend links libwayland-client, and zed-font-kit links
@@ -11,11 +11,9 @@
 name: tests
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
-# A newer push to the same branch makes the previous run obsolete.
+# A newer manual test run on the same branch makes the previous run obsolete.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

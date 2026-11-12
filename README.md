@@ -1,326 +1,421 @@
-# SpritX
+<p align="center">
+  <img src="assets/icon-256.png" alt="SpritX mascot logo" width="128" height="128" />
+</p>
 
-A GPU-accelerated terminal emulator with built-in remote control: open the
-same panes from another SpritX, or from a phone browser over an end-to-end
-encrypted link.
+<h1 align="center">SpritX Terminal</h1>
 
-![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-[![tests](https://github.com/legacy7838-create/SpritX-terminal/actions/workflows/test.yml/badge.svg)](https://github.com/legacy7838-create/SpritX-terminal/actions/workflows/test.yml)
+<p align="center">
+  A native Rust terminal for Windows and Linux, with persistent workspaces,<br />
+  pane-local file previews and encrypted remote control.
+</p>
 
----
+<p align="center">
+  <a href="https://github.com/legacy7838-create/SpritX-terminal/actions/workflows/test.yml"><img src="https://github.com/legacy7838-create/SpritX-terminal/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license" /></a>
+</p>
 
-## Highlights
+<p align="center">
+  <a href="#getting-started">Get started</a> ·
+  <a href="#everyday-workflow">Workflow</a> ·
+  <a href="#remote-control">Remote control</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#development-and-testing">Development</a> ·
+  <a href="https://discord.gg/ecyzVxaSfV">Discord</a>
+</p>
 
-**Terminal**
+## Introduction
 
-- Split panes (up to five per tab), tabs, and layout presets.
-- `vt100`-based screen model with scrollback, mouse reporting passed through
-  to the child, text selection, copy/paste, and alternate-screen support.
-- OSC 133 command blocks: prompt, command, output, exit code and duration are
-  parsed from shell-integration markers; OSC 7 keeps track of the shell's
-  working directory.
-- Twelve built-in themes (SpritX Light, SpritX Pastel, SpritX Dark,
-  Catppuccin Mocha/Latte, Dracula, Nord, Tokyo Night, Gruvbox Dark,
-  Solarized Dark, One Dark, Rosé Pine) plus a fully customisable 21-colour
-  theme block.
-- Configurable font family and size, cursor style (block/bar/underline),
-  cursor blink and scrollback length.
-- Desktop notification when a long-running command finishes.
-- A native 20px Composing orb (2.05× speed) replaces the tab's terminal icon
-  while foreground CLI activity is observed. It responds to changed live
-  screen text and submitted input, including input from remote control;
-  local typing echo and unchanged cursor/redraw updates do not keep it busy.
-  After three seconds without fresh activity the normal icon returns.
-  This is an activity estimate for arbitrary CLIs: silence is not task
-  completion. `Done`/`Failed` and completion notifications still require
-  shell-integration completion data or a process exit. A quiet computation
-  or network wait can therefore show the normal icon until output resumes.
+SpritX brings terminal sessions, project files and CLI tools into one desktop workspace. Open tabs, split a tab into independent panes, inspect a file beside the terminal you are using, and return to your projects through Recent. Background session owners and workspace snapshots let the app reconnect to retained sessions instead of always starting with a fresh shell.
 
-**Workspace**
+The desktop interface is built in **Rust with GPUI** and uses a GPU-rendered terminal backed by native PTYs—ConPTY on Windows. Remote control lets a phone browser or another SpritX instance interact with the same terminal sessions through an encrypted connection. The browser client is embedded in the executable; it uses xterm.js and does not replace the native desktop interface.
 
-- File tree beside the terminal: directory listing command configurable, git
-  branch and dirty state in the header, per-row git status badges
-  (modified/added/deleted/untracked, respecting nested-repo boundaries),
-  live refresh by bounded background polling (~1 s for a create/delete in
-  the tree; no filesystem watcher), and context-menu actions
-  (list / open / view / edit) driven by command templates.
-- Left-click a file to open its read-only preview beside the active terminal
-  pane. Previews belong to that pane, including inside splits. Right-click a
-  file to insert its shell-quoted path without running it; Shift+right-click
-  opens the file action menu. Folder expand/collapse and folder menus remain.
-  Text/code previews include line numbers, scrolling and copy; common image
-  formats can also be previewed. Use the preview's close button or Escape
-  while the preview has focus to return to the terminal.
-- Command history in `~/.config/spritx/history.jsonl`, searchable from the
-  command palette with filters such as `failed`, `ok`, `here`, `cwd:`,
-  `project:` and `branch:`.
-- Command palette for actions, tabs, panes and history.
-- Settings UI that writes straight to `config.toml`.
+## What you can do
 
-**Remote control**
-
-- This SpritX can act as a server: pair a phone or a second machine, then drive
-  the same panes from there. Input, resizes and tab switches are applied by the
-  desktop's own event loop, so both sides see one terminal.
-- Every frame after the handshake is sealed with NaCl `secretbox`
-  (XSalsa20-Poly1305). The one-time pairing secret travels in the URL *fragment*,
-  which browsers never send to the server or the tunnel, and a device that fails
-  the handshake is refused rather than downgraded to plaintext.
-- Optional `cloudflared` quick tunnel for access over HTTPS from anywhere;
-  without it the server binds the LAN address.
-- Paired devices are listed in the UI and can be revoked at any time.
-- It can also act as a client: paste a pairing link into the command palette to
-  drive another SpritX from a pane here.
-
-**Browser client**
-
-- Served by the same binary at `/`, no build step: terminal picker, extra key
-  row (Esc, Tab, Ctrl, arrows, `^C`, `^L`, `^D`), path-completion chips, font
-  size controls and a WebGL renderer when the device supports it.
-- Touch is translated to mouse and wheel events for full-screen TUIs, and the
-  software keyboard follows the caret: it comes up when you tap the input line
-  of a program that owns the mouse (or a shell prompt), not on every tap.
-- Terminal size follows the device's own box, so panes fit the phone screen
-  exactly; the desktop pane takes its size back when the last client leaves.
-- The page loads xterm.js, its fit/webgl addons and tweetnacl from jsDelivr with
-  SRI hashes, so the browser needs network access.
-
-## Requirements
-
-- Linux with Wayland or X11, or Windows 10 version 1809+ / Windows 11 (x64).
-  Windows uses native ConPTY and Windows PowerShell by default; no WSL is required.
-- A Rust toolchain (edition 2021) and working graphics drivers for GPUI.
-  On Windows use the MSVC Rust toolchain with Visual Studio Build Tools
-  (Desktop development with C++ and a Windows SDK). Linux needs the X11/Wayland,
-  xkbcommon, fontconfig and freetype development libraries listed in CI.
-- Optional: `cloudflared` for the Internet tunnel, `git` for the branch
-  indicator, a Nerd Font for the icon set (the default font stack leads with
-  `JetBrainsMono Nerd Font`).
-
-## Build and run
-
-```sh
-cargo run --release
-```
-
-Notes on the build:
-
-- The first build takes a few minutes by design: the dev profile compiles the
-  dependency tree with `opt-level = 2` and turns incremental compilation off
-  (see the comments in `Cargo.toml`). Later rebuilds of this crate are quick.
-- `vendor/xattr` is a local patch of `xattr 0.2.3`, which references
-  `libc::ENOATTR` — an alias recent `libc` no longer exposes on Linux. It is
-  required by GPUI's file-watcher stack.
-- `SPRITX_SMOKE=1` quits right after startup, which is handy in scripts.
-
-## Keyboard shortcuts
-
-`Ctrl/Cmd` means `Ctrl` on Linux and Windows, `Cmd` elsewhere.
-
-| Shortcut | Action |
+| Area | Capabilities |
 | --- | --- |
-| `Ctrl/Cmd+T` | new tab |
-| `Ctrl/Cmd+W` | close pane |
-| `Ctrl/Cmd+Tab`, `Ctrl/Cmd+Shift+Tab` | next / previous tab |
-| `Ctrl/Cmd+Shift+]`, `Ctrl/Cmd+Shift+[` | next / previous tab |
-| `Ctrl/Cmd+1` … `9` | select tab |
-| `Ctrl/Cmd+Shift+D`, `Ctrl/Cmd+Shift+E` | split right / split down |
-| `Alt+←/→/↑/↓` | move focus between panes |
-| `Ctrl/Cmd+Shift+P` | command palette |
-| `Ctrl/Cmd+Shift+H` | command history |
-| `Ctrl/Cmd+,` | settings |
-| `Ctrl/Cmd+Shift+C`, `Ctrl/Cmd+Insert` | copy selection |
-| `Ctrl/Cmd+Shift+V`, `Shift+Insert` | paste |
-| `Ctrl/Cmd+Shift+A` | select all |
-| `Ctrl/Cmd` `+` / `-` / `0` | font size up / down / reset |
-| `Shift+PgUp`, `Shift+PgDn` | scroll ten lines |
+| **Terminal workspace** | Tabs, up to five panes per tab, six layout presets, scrollback, selection, copy/paste, alternate screens and mouse reporting for terminal applications. |
+| **Project navigation** | File tree, Git branch and per-file status, background refresh, hide/show controls, Recent projects and per-pane working directories. |
+| **File previews** | Read-only text/code with line numbers, supported image previews, scrolling and copy, scoped to the terminal pane where the file was opened. |
+| **CLI workflow** | Curated Codex, Claude Code, OpenCode, Pi and Oh My Pi launcher; active-pane, new-tab and split launch actions; activity and completion indicators. |
+| **Continuity** | Close-to-tray, reopen the existing app instance, saved tabs/splits/folders/output and reconnection to retained session owners. |
+| **Appearance** | Light/dark workspace, twelve terminal themes, custom terminal colors, configurable fonts, cursor styles, blinking and reduced motion. |
+| **Remote access** | QR/link pairing, encrypted input/output, phone controls, a native SpritX client, optional HTTPS tunnel and device revocation. |
+| **Command tools** | Searchable command palette, filtered history, completion notifications and sound, foreground interrupt and scoped force stop. |
 
-## Remote control
+### Appearance and activity
 
-1. Click the phone icon in the toolbar and choose **Start sharing**. SpritX
-   binds `remote.port` (4530 by default) — loopback only when it also opens a
-   tunnel, otherwise the LAN address — and shows a one-time pairing link and QR
-   code.
-2. Open that link on the other device. The page pairs once, stores its own
-   device key locally and reconnects with it afterwards; the same device never
-   needs a new code.
-3. Pick a terminal in the browser's picker and start typing.
+Built-in terminal themes: **SpritX Pastel, SpritX Dark, SpritX Light, Catppuccin Mocha, Catppuccin Latte, Dracula, Nord, Tokyo Night, Gruvbox Dark, Solarized Dark, One Dark and Rosé Pine**. Workspace light/dark mode and the terminal color palette have separate controls. The mobile client also has its own light/dark setting.
 
-The pairing code is single-use and expires; devices can be revoked from the
-remote panel, which also cuts their live connections.
+The bundled JetBrainsMonoNL Nerd Font Mono supplies prompt glyphs without installing a system font. PowerShell, Bash and Zsh have a two-line Powerline prompt showing the user, folder, Node version when available, and time. The selected font is used across the desktop workspace and terminal panes.
 
-## Configuration
+While CLI work is observed, a native **20px Composing orb at 2.05× speed** replaces the tab's terminal icon. Activity detection uses changing live output and submitted input, rather than a fixed list of CLI names. After three quiet seconds, the normal icon returns. **Quiet does not mean finished:** `Done`/`Failed` and completion notifications depend on shell completion markers or process exit. An idle CLI, a silent computation or a network wait may show the normal icon.
 
-`$XDG_CONFIG_HOME/spritx/config.toml`, falling back to
-`~/.config/spritx/config.toml` on Linux; `%APPDATA%\spritx\config.toml` on Windows.
-History and remote device credentials live beside this file. Keys are camelCase; every field has a default,
-so a partial file still loads. The file is written atomically with `0600`
-permissions, and a corrupt file is backed up next to it as
-`config.toml.broken`.
+## Getting started
 
-| Section | Keys |
+### Requirements
+
+| Platform | Requirements |
 | --- | --- |
-| `[appearance]` | `fontFamily`, `fontSize`, `cursorStyle`, `cursorBlink`, `scrollback`, `[appearance.theme]` (21 colours) |
-| `[behavior]` | `focusFollowsMouse`, `showGitBranch`, `persistBlocks` |
-| `[shell]` | `program`, `args` |
-| `[notifications]` | `enabled`, `minDurationSec`, `sound` |
-| `[fileTree]` | `dirList`, `dirOpen`, `fileView`, `fileEdit`, `fileOpen` — command templates, `{path}` is quoted for the running shell |
-| `[remote]` | `port`, `autoTunnel` |
-| `[history]` | `enabled`, `ignore` (glob patterns; matching commands are never recorded) |
-| `[keybindings]` | action → keystroke map |
+| **Windows** | Windows 10 version 1809+ or Windows 11, Rust MSVC toolchain, Visual Studio Build Tools with Desktop development with C++ and a Windows SDK, and working graphics drivers. Native ConPTY; no WSL required. |
+| **Linux** | Wayland or X11 desktop, a current Rust toolchain, graphics drivers/Vulkan runtime and the development libraries listed below. |
 
-### Windows usage
+Optional tools: **Git** for repository status, **cloudflared** for the public HTTPS tunnel, and whichever CLIs or editor commands you want to launch. SpritX detects the supported installed CLIs; it does not install them.
 
-Build and start from PowerShell with `cargo run --release`. Release builds are
-GUI executables, so opening `spritx-terminal.exe` does not open a second console.
-The portable Windows release ZIP contains the executable, README and license.
+### Windows: build from source
 
-Settings → Shell accepts a full executable path, including spaces. For PowerShell 7,
-select `C:\Program Files\PowerShell\7\pwsh.exe`; `cmd.exe` is also supported.
-Arguments are a JSON array (for example `["-NoLogo", "-NoProfile"]`), preserving
-spaces, quotes and backslashes; `[]` selects the shell's integration defaults.
-Shell changes take effect in new tabs and panes. Custom arguments replace the
-automatic integration arguments. Windows file actions default to PowerShell
-commands and can be changed under Settings; standard defaults adapt to cmd.exe.
+Run in PowerShell:
 
-The embedded PowerShell prompt integration reports cwd (OSC 7), including Unicode
-paths, so the file tree follows `Set-Location`. It does not currently emit OSC 133
-command markers: rich command history and duration tracking need a shell that
-provides those markers. cmd.exe has no automatic cwd/history integration.
-Remote clients can connect between Linux and Windows using the same protocol.
-
-### Shell integration
-
-Command blocks, exit codes and the working-directory tracking come from the
-bundled prompt scripts (`assets/shell/spritx-prompt.bash` and
-`assets/shell/spritx-prompt.zsh`), which carry the OSC 7 and OSC 133 markers.
-SpritX writes the script for your shell into a generated rc file under the
-config directory (`~/.config/spritx/gpui-bashrc` for bash, `gpui-zdotdir` for
-zsh) and starts the shell against that file, so your own rc still loads first.
-
-The generated rc also sources an *optional* init file, guarded with `[ -f … ]`
-so a missing path is a no-op:
-
-```
-../scripts/spritx-shell-init.bash
-../scripts/spritx-shell-init.zsh
+```powershell
+git clone https://github.com/legacy7838-create/SpritX-terminal.git
+cd SpritX-terminal
+cargo run dev
 ```
 
-That path is resolved at compile time from the crate root, so the release
-packages do not ship it and do not need it — a packaged binary simply has no
-extra init file to source. When no init file is present, SpritX starts your
-shell with `-l` and the terminal itself works exactly the same — only the
-block, history and cwd extras stay off.
+`cargo run dev` uses Cargo's development profile and passes `dev` to the application. `cargo run` also starts a development build. There is no separate frontend build step for the native UI.
 
-## Packages
+To build and run the release executable:
 
-Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml),
-which is started by hand from the Actions tab and refuses to run unless the
-tests workflow passed for the commit it is run on. It publishes six packages:
-
-| Package | For | Built with |
-| --- | --- | --- |
-| `SpritX-<version>-windows-x86_64.zip` | Windows 10/11 x64 | MSVC release build, portable ZIP |
-| `SpritX-<version>-x86_64.flatpak` | cross-distro, sandboxed | the manifest in `packaging/flatpak` |
-| `SpritX-<version>-x86_64.AppImage` | portable, nothing to install | `appimagetool` over an AppDir |
-| `spritx-terminal_<version>_amd64.deb` | Ubuntu, Debian, Mint | `cargo deb` |
-| `spritx-terminal-<version>-1.x86_64.rpm` | Fedora, RHEL | `cargo generate-rpm` |
-| `spritx-terminal-<version>-1-x86_64.pkg.tar.zst` | Arch, Omarchy, EndeavourOS | `makepkg` over `packaging/arch/PKGBUILD` |
-
-GitHub does not keep the executable bit on release assets, so the AppImage needs
-one command before its first run:
-
-```sh
-chmod +x SpritX-*-x86_64.AppImage && ./SpritX-*-x86_64.AppImage
+```powershell
+cargo build --release --locked
+.\target\release\spritx-terminal.exe
 ```
 
-The version comes from `Cargo.toml`, so a release is: bump it, push, let the
-tests go green, then run the release workflow.
+The Windows release executable is a GUI application and does not open an extra console window.
 
-## Development
+### Linux: build from source
 
-```sh
-cargo test                  # integration tests: terminal, config, history,
-                            # remote protocol, OSC parsing
-SPRITX_UI_TESTS=1 cargo test  # also runs the smoke tests, which open a real
-                              # window for ~3 seconds each
+On Debian/Ubuntu, install the libraries used by CI:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  pkg-config build-essential libwayland-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+  libfontconfig1-dev libfreetype-dev libvulkan1
+
+git clone https://github.com/legacy7838-create/SpritX-terminal.git
+cd SpritX-terminal
+cargo run dev
 ```
 
-Every push and pull request runs the same suite on GitHub Actions
-([`.github/workflows/test.yml`](.github/workflows/test.yml), Ubuntu with the
-X11/Wayland/font libraries installed, and Windows). Unix PTY tests run on Linux;
-Windows runs native ConPTY tests for input/output, exit status, resize, process
-termination and PowerShell cwd reporting.
+Other distributions need the equivalent development packages. For a release build:
 
-Runtime hooks used for automation and profiling:
+```bash
+cargo build --release --locked
+./target/release/spritx-terminal
+```
 
-| Variable | Effect |
+The first build compiles the graphics and terminal dependencies and can take several minutes. Development dependencies use `opt-level = 2`; the application uses `opt-level = 1`, with incremental compilation disabled. A local `vendor/xattr` patch keeps GPUI's Unix dependency compatible with the current `libc` API.
+
+Prebuilt package formats and the release workflow are described under [Packaging and releases](#packaging-and-releases).
+
+## Everyday workflow
+
+1. **Open a project.** Start SpritX and change directory in a terminal. Supported shell integration updates that pane's working directory and the file-tree location.
+2. **Arrange your workspace.** Use `+` for another tab, split right/down, or choose a layout preset. A tab can hold up to five terminal panes.
+3. **Run your tools.** Type a command normally or use one of the five CLI logos at the bottom of the sidebar. Launcher actions can target a new tab or split, and supported tools are rediscovered in the background.
+4. **Inspect files beside your work.** Left-click a file to open its preview in the active pane. Right-click a file to insert its path into that terminal without running it.
+5. **Follow progress.** Activity indicators show observed work. Confirmed completion can display `Done`/`Failed` and trigger a notification or sound, according to Settings.
+6. **Return later.** With the default continuity options enabled, closing the window keeps SpritX in the background. Reopen it from the tray or launch it again to return to the existing instance.
+
+Recent records projects when work starts; simply opening your home/profile directory does not create a project entry. Clicking a Recent item returns to its live pane when available. Saved workspace data can restore layout, folders and output and reconnect to surviving session owners. If an owner is no longer available, SpritX starts a replacement shell; it cannot recover a process that has exited. Recent entries can be removed individually.
+
+### File-tree interactions
+
+| Interaction | Result |
 | --- | --- |
-| `SPRITX_OPEN=settings\|palette\|remote\|remote-menu` | open a modal (or the remote panel) at launch |
-| `SPRITX_SMOKE=1` | quit after three seconds |
-| `SPRITX_PROFILE=1` | print the latency profiler — debug builds do this by default, release builds need the variable. `SPRITX_ROWS=1` adds a per-row breakdown, `SPRITX_FRAMES=1` logs every frame, `SPRITX_QUIET=1` silences all of it |
-| `SPRITX_DEBUG_KEYS=1` | log every keystroke |
+| Left-click a folder | Expand or collapse it. |
+| Left-click a file | Open a read-only preview with a slide-in panel beside the active terminal. |
+| Right-click a file | Insert its shell-quoted path into the active terminal, without Enter or execution. |
+| Shift + right-click a file | Open the file action menu. |
+| Right-click a folder | Open the folder action menu. |
+| Preview copy button / `Ctrl+C` while the preview has focus | Copy the loaded text preview. |
+| Preview close button / `Esc` while the preview has focus | Close that pane's preview. |
 
-## Project layout
+Previews belong to **pane IDs, not folder paths**. Two terminals in the same folder keep independent preview state. Text previews load the first **64 KiB**; supported PNG, JPEG, WebP, GIF and BMP images are limited to **8 MiB / 16 million pixels**, with a static thumbnail for display. UTF-8 and BOM-marked UTF-16 text are supported. Very long displayed lines are capped at 4,096 characters. Binary, unavailable or oversized files show an explanatory state. A preview never edits or executes the file.
 
-```
-src/main.rs          window and application bootstrap
-src/platform.rs      platform config paths, default shell and path quoting
-src/terminal.rs      PTY session, vt100 screen, grid rendering, cell metrics
-src/keys.rs          keystroke → terminal byte encoding
-src/theme.rs         theme presets and loading
-src/state.rs         panes, tabs, settings, palette state
-src/metrics.rs       optional latency profiler
-src/screens/         app_shell (window, actions, terminal pump), pane_tree,
-                     tab_bar, file_tree, overlays
-src/components/      icons, buttons, toggles, text input (4,096-char cap),
-                     context menus
-src/backend/
-  remote_server.rs   HTTP/WebSocket server, pairing, sealed frames, replay
-  remote.rs          handshake, device store, protocol types
-  remote_client.rs   outbound SpritX↔SpritX links
-  osc.rs             OSC 7 / 133 / 7733 parsing (cwd, blocks, aliases)
-  history.rs         command history store and search
-  config.rs          config load/save/export
-  git.rs, files.rs   branch information, per-path git statuses, file-tree helpers
-```
+### Close, reopen and quit
 
-## License
+- **Window close:** with `closeToTray` enabled, keep the app and sessions in the background. If a tray is unavailable, the app minimizes instead.
+- **Tray → Open SpritX / launch again:** show the existing application instance.
+- **Close a pane/tab:** end the sessions belonging to that pane/tab. The last tab can be closed, leaving an empty workspace; `+` creates a terminal again.
+- **Tray → Quit SpritX:** explicitly terminate the desktop app and its owned sessions.
 
-MIT — see [LICENSE](LICENSE).
+When testing a newly built executable, a retained older instance may reopen instead. Finish any active work and quit the old instance before launching the updated build.
 
-### Stopping running commands
+### Interrupt a running command
 
 | Control | Behavior |
 | --- | --- |
-| `Ctrl+C` or right-click → Interrupt process | Interrupt the foreground job, including `npm run dev`, `bun run dev`, and Node servers. The shell remains open. |
-| `Ctrl+Shift+K` or right-click → Force stop & restart | Stop the active local terminal's process tree and restart its shell in the same folder. Other panes are unaffected. This resets that terminal's live screen. |
-| `Ctrl+Shift+C` | Copy selected text. |
+| `Ctrl+C` / terminal menu → Interrupt process | Interrupt the foreground job while keeping its shell available. |
+| `Ctrl+Shift+K` / terminal menu → Force stop & restart | Stop that local pane's process tree and restart its shell in the same folder. Other panes are unaffected. |
 | `Ctrl+D` | Send EOF where the shell/program supports it. |
-| `Ctrl+Z` on Linux | Suspend the foreground job; `fg` resumes it. This does not terminate it. |
+| `Ctrl+Z` on Linux | Suspend the foreground job; use `fg` to resume. |
 | `Ctrl+\` on Linux | Send the terminal quit character (`SIGQUIT`). |
-| `Ctrl+Z`, then Enter on Windows | EOF for console readers that support the Windows convention. |
+| `Ctrl+Z`, then Enter on Windows | EOF for console readers that support that convention. |
 
-Programs may handle or ignore interrupts; force stop is an explicit fallback.
-No runtime-specific kill command is substituted into your input. Normal shell
-commands such as `kill -TERM <PID>` (Linux), `Stop-Process -Id <PID>` (PowerShell),
-and `taskkill /PID <PID> /T /F` (Windows) remain available.
+Programs can handle or ignore interrupts. Force stop is an explicit fallback and resets that pane's live screen. Native shell tools such as `kill`, `Stop-Process` and `taskkill` remain available; SpritX does not substitute runtime-specific kill commands into your input.
 
-References: [Node signal events](https://nodejs.org/api/process.html#signal-events),
-[Bun Ctrl+C](https://bun.sh/guides/process/ctrl-c),
-[Bash signals](https://www.gnu.org/s/bash/manual/html_node/Signals.html),
-[Windows console signals](https://learn.microsoft.com/en-us/windows/console/ctrl-c-and-ctrl-break-signals),
-[taskkill](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/taskkill).
+## Remote control
 
-### SpritX Pastel appearance
+### Connect a phone or browser
 
-The stock appearance now uses a dark plum background and pastel ANSI colors.
-PowerShell, Bash and Zsh get a two-line Powerline prompt with user, current folder,
-Node version (when available), and local time. Prompt styling is scoped to SpritX;
-your shell profile is not modified. Custom shell arguments bypass this integration.
-The previous stock SpritX Dark theme upgrades automatically; custom themes stay intact.
+1. Click the **phone icon** in the desktop toolbar and select **Start sharing**.
+2. Scan the QR code or open the pairing link on the other device.
+3. Complete pairing, select a terminal and interact with the same session running on the desktop.
+4. Use **Stop sharing** to close active bridges and stop the tunnel. Individual paired devices can also be revoked.
 
-JetBrainsMonoNL Nerd Font Mono is bundled for the segment arrows and icons.
-Font source and SIL Open Font License: [assets/fonts](assets/fonts/README.md).
-Colored `ls` output depends on your shell's listing tool and its configuration;
-this theme supplies the palette without replacing the listing command.
+The default port is **4530**. If automatic tunneling is enabled and `cloudflared` is available, SpritX binds locally and starts an HTTPS quick tunnel. Otherwise it uses the LAN interface, so the device needs network access to that machine.
+
+Pairing codes are **single-use and expire after 10 minutes**. That is separate from sharing duration: a successfully paired device keeps its own device key for reconnection. Connections can still drop when the network disappears or a browser stops sending keepalives; stopping sharing or revoking a device cuts its access.
+
+### Connect another SpritX
+
+Open the command palette and paste the pairing link to connect to a remote SpritX from a native pane. The same protocol is used between Windows and Linux hosts/clients.
+
+### Mobile controls
+
+The embedded browser UI includes a terminal picker, extra keys (`Esc`, `Tab`, `Ctrl`, arrows, `Ctrl+C`, `Ctrl+L`, `Ctrl+D`), path-completion chips, font sizing, light/dark mode and sound controls. Touch input supports mouse-aware terminal applications. The terminal fits the connected device, and the desktop pane takes its size back when the last remote client leaves.
+
+Desktop and mobile theme preferences can be changed independently. The browser loads xterm.js, its fit/WebGL addons and tweetnacl from jsDelivr with SRI hashes, so it needs Internet access to load those dependencies.
+
+### Transport and access
+
+After the pairing handshake, terminal/control frames use NaCl **secretbox (XSalsa20-Poly1305)** with per-session keys and ordered counters. The pairing secret is carried in the URL fragment, which is not sent in HTTP requests. Failed handshakes are refused rather than downgraded to plaintext.
+
+A paired device can control the exposed terminal sessions. Share pairing links only with intended users and revoke devices when access is no longer needed.
+
+## Keyboard shortcuts
+
+`Ctrl` applies on Windows/Linux. The code also recognizes the platform command modifier where available.
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+T` | New tab |
+| `Ctrl+W` | Close active pane |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+Shift+]` / `Ctrl+Shift+[` | Next / previous tab |
+| `Ctrl+1` … `Ctrl+9` | Select a tab |
+| `Ctrl+Shift+D` / `Ctrl+Shift+E` | Split right / down |
+| `Alt+←/→/↑/↓` | Move focus between panes |
+| `Ctrl+Shift+P` | Command palette |
+| `Ctrl+Shift+H` | Command history |
+| `Ctrl+,` | Settings |
+| `Ctrl+Shift+C` / `Ctrl+Insert` | Copy terminal selection |
+| `Ctrl+Shift+V` / `Shift+Insert` | Paste into the terminal |
+| `Ctrl+Shift+A` | Select all terminal text |
+| `Ctrl` + `+` / `-` / `0` | Increase / decrease / reset terminal font size |
+| `Shift+PgUp` / `Shift+PgDn` | Scroll ten lines |
+| `Esc` | Close the current overlay, or the focused file preview |
+
+The command palette supports action filtering, arrow-key selection, Enter to activate and pasted remote links. Its search caret blinks while the focused field is empty and stays steady once text is entered. History supports filters including `failed`, `ok`, `here`, `cwd:`, `project:` and `branch:`.
+
+## Configuration
+
+Open **Settings** to change Appearance, Shell, Notifications, File tree, Remote, History, Shortcuts or General preferences. About includes version and license information.
+
+| Platform | Configuration directory |
+| --- | --- |
+| Windows | `%APPDATA%\spritx\` |
+| Linux | `$XDG_CONFIG_HOME/spritx/`, falling back to `~/.config/spritx/` |
+
+`config.toml` stores preferences, `history.jsonl` stores recorded command history, and `sessions/workspace.json` stores the workspace checkpoint. Remote device credentials also live under the configuration directory. Writes are atomic; Unix permissions are restricted, and malformed configuration is backed up as `config.toml.broken`.
+
+A partial configuration is valid: omitted fields keep their defaults. For example:
+
+```toml
+[appearance]
+lightWorkspace = false
+fontFamily = "JetBrainsMonoNL Nerd Font Mono"
+fontSize = 14
+cursorStyle = "block"
+cursorBlink = true
+scrollback = 5000
+
+[behavior]
+closeToTray = true
+restoreWorkspace = true
+keepSessions = true
+saveTerminalOutput = true
+reducedMotion = false
+
+[shell]
+args = []
+
+[notifications]
+enabled = true
+minDurationSec = 10
+sound = true
+
+[remote]
+port = 4530
+autoTunnel = true
+```
+
+| Section | Purpose / additional keys |
+| --- | --- |
+| `[appearance]` | Font, cursor, scrollback, workspace mode; `[appearance.theme]` holds the custom terminal palette. |
+| `[behavior]` | Continuity and motion options; also `focusFollowsMouse`, `showGitBranch`, `persistBlocks`. |
+| `[shell]` | Optional `program` and an argument array. |
+| `[notifications]` | Completion notification, duration threshold and sound. |
+| `[fileTree]` | `dirList`, `dirOpen`, `fileView`, `fileEdit`, `fileOpen`; `{path}` is quoted for the running shell. |
+| `[cliLauncher]` | Supported-tool paths and launcher preferences (`manual`, `pinned`, `hidden`). |
+| `[remote]` | Sharing port and automatic tunnel preference. |
+| `[history]` | `enabled` and `ignore` patterns; default exclusions include password/token/secret-like command patterns. |
+| `[keybindings]` | Stored action-to-keystroke mappings. |
+
+### Shell integration
+
+| Shell | Integration |
+| --- | --- |
+| Windows PowerShell / PowerShell 7 | Embedded initialization passed through an encoded command; cwd and OSC 133 command lifecycle tracking. Native `curl.exe` is resolved for the familiar `curl` alias when available. |
+| Bash / Zsh | Bundled prompt scripts for cwd, command text, lifecycle markers and Powerline prompt styling. |
+| Fish | Cwd and pre/post-command hooks. |
+| cmd.exe | Terminal operation and shell-specific file actions; no automatic cwd/rich-history integration. |
+
+An empty shell argument list enables the integration defaults. Explicit custom arguments replace those defaults, so completion/history/cwd features depend on what that shell then emits. Select a full executable path in **Settings → Shell**, such as `C:\Program Files\PowerShell\7\pwsh.exe`; changes apply to new sessions.
+
+Bash/Zsh wrappers are generated under SpritX's configuration directory and source the user's existing rc file first. Optional sibling `scripts/spritx-shell-init.bash` / `.zsh` files are loaded only if present; the bundled integration does not require those development files. SpritX does not rewrite your normal shell profile.
+
+## How the project works
+
+```mermaid
+flowchart TD
+    Desktop["Rust + GPUI desktop"] --> Workspace["Tabs and split panes"]
+    Workspace <--> Owners["Independent session owners"]
+    Owners <--> PTY["Native PTY / Windows ConPTY"]
+    PTY <--> Shell["Shell, CLI or foreground job"]
+    Workspace --> Snapshot["Workspace checkpoint and Recent"]
+    Tree["File tree"] --> Preview["Read-only preview in the active pane"]
+    Tree -->|"Quoted path, no Enter"| Workspace
+    Remote["Axum + encrypted WebSocket gateway"] <--> Workspace
+    Phone["Phone browser / another SpritX"] <--> Remote
+```
+
+The terminal pump processes PTY output into the `vt100` screen model. Shell markers supply working-directory and command-lifecycle events. The UI renders that state, while session owners retain the underlying processes separately from the desktop window. Workspace checkpoints record how to restore or reconnect panes.
+
+File discovery, preview loading and terminal startup/teardown use background work to keep blocking filesystem/process operations out of interactive UI handlers. Preview requests carry pane and request identities, so a late result cannot overwrite a newer selection or reopen a removed preview.
+
+### Repository map
+
+```text
+src/
+  main.rs                 Desktop startup, window, tray and instance handling
+  desktop.rs              Background/reopen lifecycle and tray integration
+  terminal.rs             PTY sessions, screen model, rendering and selection
+  platform.rs             OS paths, shell defaults and path quoting
+  platform/powershell.rs  Windows shell integration
+  keys.rs                 Keyboard-to-terminal byte encoding
+  state.rs                Tabs, panes, layouts and settings state
+  theme.rs                Desktop theme tokens
+  theme_presets.rs        Terminal palette presets
+  screens/
+    app_shell.rs          Application actions, state and terminal pump
+    pane_tree.rs          Pane layout and terminal interaction
+    tab_bar.rs            Tab strip, toolbar and context menu
+    tab_motion.rs         Measured tab transitions
+    file_tree.rs          Project tree, refresh, Git badges and file actions
+    file_preview.rs       Pane-local file viewer and transitions
+    cli_launcher.rs       Curated tool discovery and launch actions
+    workspace.rs          Checkpoint restore, Recent and owner status
+    overlays.rs           Settings, palette and remote panels
+  backend/
+    config.rs             Preference storage and atomic writes
+    files.rs, git.rs      Filesystem and repository information
+    file_preview.rs       Bounded text/image preview loading
+    workspace.rs          Saved workspace format and Recent project rules
+    session_owner.rs      Retained sessions and reconnect protocol
+    osc.rs, history.rs    Shell markers and command-history search
+    remote*.rs            Pairing, encryption, server and native remote client
+  components/             Shared native UI controls and activity orb
+assets/                   Embedded logos, icons, fonts and shell scripts
+tests/                    Model, backend, terminal and native-window tests
+packaging/                Linux package manifests and launchers
+.github/workflows/        Tests, manual build and gated release jobs
+build.rs                  Embedded asset tables and Windows icon resource
+```
+
+## Development and testing
+
+Run from the repository root:
+
+```bash
+cargo check --locked --tests
+cargo test --locked
+cargo build --release --locked
+```
+
+Display-dependent tests are ignored by the default test run. On a machine with a working desktop, run them explicitly:
+
+```bash
+cargo test --test ui_smoke -- --ignored --test-threads=1
+cargo test --test tab_lifecycle -- --ignored --test-threads=1
+cargo test --test file_preview_ui -- --ignored --test-threads=1
+```
+
+The Windows tray lifecycle test has an additional opt-in:
+
+```powershell
+$env:SPRITX_UI_TESTS = "1"
+cargo test --test desktop_lifecycle -- --test-threads=1
+Remove-Item Env:SPRITX_UI_TESTS
+```
+
+Setting `SPRITX_UI_TESTS=1` alone does **not** unignore the other display tests. Some process-control tests need optional external runtimes such as Node/npm/Bun; inspect their test prerequisites before running them.
+
+CI runs the default test suite on **Ubuntu and Windows** for pushes and pull requests. GUI, physical phone and distribution-specific tray behavior need separate live verification; a default CI pass does not imply all of those scenarios ran. Existing verification notes are in [BUGFIX-VALIDATION.md](BUGFIX-VALIDATION.md) and [TAB-SMOOTHNESS-REPORT.md](TAB-SMOOTHNESS-REPORT.md).
+
+### Runtime diagnostics
+
+| Variable | Purpose |
+| --- | --- |
+| `SPRITX_QUIET=1` | Silence routine profiling output. |
+| `SPRITX_PROFILE=1` | Enable latency profiling in release builds; debug builds enable it by default. |
+| `SPRITX_ROWS=1` / `SPRITX_FRAMES=1` | Add row-level / frame-level profiling detail. |
+| `SPRITX_MEM=1` | Enable memory profiling in release builds. |
+| `SPRITX_MEM_BACKTRACE=1` | Add allocation attribution. |
+| `SPRITX_OPEN=palette` | Open the command palette at startup; `settings`, `remote` and `remote-menu` are also supported. |
+| `SPRITX_SMOKE=1` | Exit after approximately three seconds; isolated test runs use direct sessions. |
+| `SPRITX_DEBUG_KEYS=1` | Log keyboard events for local debugging. |
+
+Key logging can include entered text; use it deliberately when diagnosing input issues.
+
+## Packaging and releases
+
+The [release workflow](.github/workflows/release.yml) is manually dispatched and requires a successful test-workflow run for the same commit. Version/tag values come from `Cargo.toml`.
+
+| Format | Target |
+| --- | --- |
+| Windows portable ZIP | Windows x86-64; executable, README and MIT license |
+| Flatpak | Linux cross-distribution bundle |
+| AppImage | Linux portable executable |
+| DEB | Debian/Ubuntu family |
+| RPM | Fedora/RHEL family |
+| Arch package | Arch-based systems |
+
+The executable embeds its UI assets. The Linux package definitions install the desktop launcher and app icon; the Windows build embeds the `.ico` resource. Release formats are described by the workflow; check the repository's [Releases page](https://github.com/legacy7838-create/SpritX-terminal/releases) for the assets actually published for a version.
+
+Before running a downloaded AppImage:
+
+```bash
+chmod +x SpritX-*-x86_64.AppImage
+./SpritX-*-x86_64.AppImage
+```
+
+## Contributing and community
+
+Open an issue with the operating system, shell, reproduction steps and relevant diagnostic output. For changes, keep Windows/Linux behavior in mind, include focused regression coverage when needed, and describe which runtime checks were actually performed.
+
+Join the [SpritX Discord community](https://discord.gg/ecyzVxaSfV). The same invite is available from the Discord icon beside remote control in the desktop toolbar.
+
+## License and credits
+
+SpritX is licensed under the **MIT License**. See [LICENSE](LICENSE).
+
+Bundled resources retain their own notices:
+
+- [Hugeicons](assets/icons/LICENSE-Hugeicons.txt) and [LobeIcons](assets/icons/LICENSE-LobeIcons.txt) interface assets.
+- [CLI brand artwork and source credits](assets/brands/README.md).
+- [JetBrainsMonoNL Nerd Font Mono](assets/fonts/README.md), under the [SIL Open Font License](assets/fonts/OFL.txt).
+- Native Composing orb adapted from Thinking Orbs; [upstream MIT notice](assets/licenses/Thinking-Orbs-MIT.txt).
+- [SpritX mascot artwork and icon exports](assets/APP-ICON.md).

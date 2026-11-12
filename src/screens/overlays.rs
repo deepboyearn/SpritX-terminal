@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use gpui::{
-    AnyElement, Context, Div, ElementId, FontWeight, IntoElement, MouseButton, SharedString,
+    AnimationExt, AnyElement, Context, Div, ElementId, FontWeight, IntoElement, MouseButton, SharedString,
     Stateful, deferred, div, prelude::*, px, relative, rgb,
 };
 
@@ -859,11 +859,54 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
     };
 
     let query_empty = app.palette_query.trim().is_empty();
-    let query_display = if query_empty {
-        placeholder.to_string()
-    } else {
-        app.palette_query.clone()
-    };
+    let input_empty = app.palette_query.is_empty();
+    let focused = app.palette_query_focused;
+    // Reserve the border on both states: focus must not move the text or row.
+    let field = div().id("palette-query").flex().items_center().gap(px(12.))
+        .h(px(44.)).px(px(12.)).rounded(px(8.))
+        .border_1().border_color(if focused { theme.accent.opacity(0.65) } else { theme.outer })
+        .bg(theme.outer).cursor_text()
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+            window.focus(&this.focus_handle);
+            this.focus_palette_query(cx);
+        }))
+        .child(icon(Icon::Search, 16., if focused { theme.accent } else { theme.fg_dim }))
+        .child(div().relative().flex_1().min_w_0().h(px(20.)).text_size(px(14.))
+            .when(input_empty, |text| text.child(
+                div().absolute().inset_0().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                    .text_color(theme.fg_dim).child(placeholder),
+            ))
+            .child(div().relative().flex().items_center().h_full().overflow_hidden()
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                    .text_color(theme.fg).child(app.palette_query.clone()))
+                .when(focused, |text| text.child(
+                    div().flex_none().w(px(1.)).h(px(16.)).bg(theme.accent)
+                        .opacity(if !input_empty || app.settings.reduced_motion || app.palette_blink_on { 1. } else { 0. }),
+                ))))
+        .when(!input_empty, |field| field.child(
+            div().id("palette-clear").flex().items_center().justify_center()
+                .size(px(24.)).rounded(px(4.)).cursor_pointer()
+                .hover(|s| s.bg(theme.white_06))
+                // Keep the clear button's mouse-down/up identity stable while
+                // the parent focus animation is restarted on ordinary clicks.
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    window.focus(&this.focus_handle);
+                    this.palette_query.clear();
+                    this.palette_selected = 0;
+                    this.focus_palette_query(cx);
+                }))
+                .child(icon(Icon::X, 14., theme.fg_dim)),
+        ));
+    let field = if focused && !app.settings.reduced_motion {
+        field.with_animation(
+            ("palette-query-focus", app.palette_focus_revision),
+            gpui::Animation::new(std::time::Duration::from_millis(160))
+                .with_easing(gpui::ease_out_quint()),
+            move |field, progress| field.border_color(theme.accent.opacity(0.15 + progress * 0.5)),
+        ).into_any_element()
+    } else { field.into_any_element() };
 
     let header = div()
         .flex().flex_col().flex_none()
@@ -885,26 +928,7 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
                         .child(kbd(theme, "Esc")),
                 ),
         )
-        .child(
-            div().id("palette-query").flex().items_center().gap(px(12.))
-                .h(px(44.)).px(px(12.)).rounded(px(8.))
-                .bg(theme.outer).cursor_text()
-                .child(icon(Icon::Search, 16., theme.fg_dim))
-                .child(div().flex_1().min_w_0().text_size(px(14.))
-                    .text_color(if query_empty { theme.fg_dim } else { theme.fg })
-                    .overflow_hidden().whitespace_nowrap().text_ellipsis().child(query_display))
-                .when(!query_empty, |field| field.child(
-                    div().id("palette-clear").flex().items_center().justify_center()
-                        .size(px(24.)).rounded(px(4.)).cursor_pointer()
-                        .hover(|s| s.bg(theme.white_06))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.palette_query.clear();
-                            this.palette_selected = 0;
-                            cx.notify();
-                        }))
-                        .child(icon(Icon::X, 14., theme.fg_dim)),
-                )),
-        );
+        .child(field);
 
     let mut sections: Vec<AnyElement> = Vec::new();
     let mut history_count = 0usize;

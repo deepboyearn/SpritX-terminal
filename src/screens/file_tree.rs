@@ -919,6 +919,20 @@ fn shell_quote(app: &SpritXApp, path: &str) -> String {
     crate::platform::quote_path(path, active_shell_kind(app))
 }
 
+pub(super) fn insert_tree_path(app: &mut SpritXApp, path: &str, cx: &mut Context<SpritXApp>) -> bool {
+    let quoted = shell_quote(app, path);
+    if quoted.is_empty() {
+        app.show_toast("This path cannot be safely inserted into cmd.exe; use PowerShell", cx);
+        return false;
+    }
+    if !app.send_to_terminal(&quoted, false) {
+        app.show_toast("No active terminal", cx);
+        return false;
+    }
+    app.file_preview_focused = None;
+    true
+}
+
 fn with_path(template: &str, quoted: &str) -> String {
     template.replace("{path}", quoted)
 }
@@ -1802,25 +1816,23 @@ fn file_tree_row(
                 }
                 this.file_tree_ui = ft_encode(&ui);
             } else {
-                let quoted = shell_quote(this, &path);
-                if quoted.is_empty() {
-                    this.show_toast(
-                        "This path cannot be safely inserted into cmd.exe; use PowerShell",
-                        cx,
-                    );
-                    return;
-                }
-                if this.send_to_terminal(&quoted, false) {
-                    this.show_toast(format!("Inserted {quoted}"), cx);
-                } else {
-                    this.show_toast("No active terminal", cx);
-                }
+                this.open_file_preview(std::path::PathBuf::from(&path), cx);
             }
             cx.notify();
         }))
         .on_mouse_down(
             MouseButton::Right,
-            cx.listener(move |this, _, _, cx| {
+            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                // Files paste their quoted path without Enter. Shift retains
+                // access to the existing file action menu; folders keep it.
+                if !is_dir && !event.modifiers.shift {
+                    if insert_tree_path(this, &path_for_ctx, cx) {
+                        window.focus(&this.focus_handle);
+                    }
+                    cx.notify();
+                    return;
+                }
                 let mut ui = ft_ui(this);
                 ui.ctx = Some((path_for_ctx.clone(), is_dir));
                 this.file_tree_ui = ft_encode(&ui);

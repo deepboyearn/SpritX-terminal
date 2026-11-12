@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(debug_assertions)]
+pub use super::file_preview::run_test as file_preview_test;
 use std::sync::Arc;
 
 use gpui::{
@@ -107,6 +109,13 @@ pub struct SpritXApp {
     pub settings_section: crate::state::SettingsSection,
     pub palette_query: String,
     pub palette_selected: usize,
+    pub(super) palette_query_focused: bool,
+    pub(super) palette_focus_revision: usize,
+    pub(super) palette_blink_epoch: std::time::Instant,
+    pub(super) palette_blink_on: bool,
+    pub(super) file_previews: HashMap<u64, super::file_preview::Preview>,
+    pub(super) file_preview_focused: Option<u64>,
+    pub(super) next_file_preview_request: u64,
     pub(super) palette_scroll: ScrollHandle,
     pub(super) palette_scroll_selection: std::cell::RefCell<Option<(PaletteMode, String, usize)>>,
     pub theme_names: Vec<&'static str>,
@@ -233,6 +242,13 @@ impl SpritXApp {
             },
             palette_query: String::new(),
             palette_selected: 0,
+            palette_query_focused: std::env::var("SPRITX_OPEN").as_deref() == Ok("palette"),
+            palette_focus_revision: 0,
+            palette_blink_epoch: std::time::Instant::now(),
+            palette_blink_on: true,
+            file_previews: HashMap::new(),
+            file_preview_focused: None,
+            next_file_preview_request: 0,
             palette_scroll: ScrollHandle::new(),
             palette_scroll_selection: Default::default(),
             theme_names: crate::state::sample_theme_names(),
@@ -353,6 +369,21 @@ impl SpritXApp {
                         if visible != this.cursor_blink_on {
                             this.cursor_blink_on = visible;
                             if this.modal.is_none() { cx.notify(); }
+                        }
+                        // Search caret blinks only while the focused field is
+                        // empty. Reuse the existing timer instead of adding a
+                        // perpetual animation or another background task.
+                        if matches!(this.modal, Some(Modal::Palette(_)))
+                            && this.palette_query_focused && this.palette_query.is_empty()
+                            && !this.settings.reduced_motion
+                        {
+                            let visible = crate::terminal::cursor_blink_visible(
+                                true, this.palette_blink_epoch.elapsed(),
+                            );
+                            if visible != this.palette_blink_on {
+                                this.palette_blink_on = visible;
+                                cx.notify();
+                            }
                         }
                         if this.pump_terminals() {
                             cx.notify();
@@ -1002,6 +1033,7 @@ impl SpritXApp {
     /// Send a keydown to the active terminal. Like a normal terminal, typing
     /// snaps the viewport back to the live prompt if it was scrolled up.
     pub fn type_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.file_preview_has_focus() { return; }
         if let Some(bytes) = crate::keys::encode_key(event) {
             let was_scrolled = self.active_scrolled();
             let was_hidden = !self.cursor_blink_on;
@@ -1112,12 +1144,15 @@ impl SpritXApp {
         // a removed pane cannot leave a reconnect loop behind.
         self.remote_links.retain(|leaf, _| live.contains(leaf));
         self.remote_link_notes.retain(|leaf, _| live.contains(leaf));
+        self.file_previews.retain(|leaf, _| live.contains(leaf));
     }
 
     /// Drop every per-pane entry for a single leaf, killing its session and
     /// dropping its remote link (whose `Drop` tears the reconnect loop down).
     /// Called immediately on close so no stale entry outlives the pane.
     fn teardown_leaf(&mut self, leaf: u64) {
+        self.file_previews.remove(&leaf);
+        if self.file_preview_focused == Some(leaf) { self.file_preview_focused = None; }
         self.pending_tab_sessions.remove(&leaf);
         self.pending_tab_input.remove(&leaf);
         if let Some(session) = self.sessions.remove(&leaf) {
@@ -1201,6 +1236,7 @@ impl SpritXApp {
         window.focus(&self.focus_handle);
     }
     pub fn close_modal(&mut self) {
+        self.palette_query_focused = false;
         crate::metrics::event("action.close_modal");
         self.modal = None;
         self.layouts_open = false;
@@ -1364,8 +1400,17 @@ impl SpritXApp {
         ));
         self.close_modal();
         self.modal = Some(Modal::Palette(mode));
+        self.focus_palette_query(cx);
         self.palette_query.clear();
         self.palette_selected = 0;
+        cx.notify();
+    }
+
+    pub(super) fn focus_palette_query(&mut self, cx: &mut Context<Self>) {
+        self.palette_query_focused = true;
+        self.palette_focus_revision = self.palette_focus_revision.wrapping_add(1);
+        self.palette_blink_epoch = std::time::Instant::now();
+        self.palette_blink_on = true;
         cx.notify();
     }
 
@@ -1504,6 +1549,7 @@ impl SpritXApp {
         ch: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.palette_query_focused { self.focus_palette_query(cx); }
         match key {
             "up" => {
                 self.palette_selected = self.palette_selected.saturating_sub(1);
@@ -1519,6 +1565,10 @@ impl SpritXApp {
             "backspace" => {
                 self.palette_query.pop();
                 self.palette_selected = 0;
+                if self.palette_query.is_empty() {
+                    self.palette_blink_epoch = std::time::Instant::now();
+                    self.palette_blink_on = true;
+                }
                 cx.notify();
                 true
             }
@@ -1773,7 +1823,7 @@ impl SpritXApp {
     }
 
     pub(super) fn terminal_has_focus(&self) -> bool {
-        self.modal.is_none()
+        !self.file_preview_has_focus() && self.modal.is_none()
             && self.editing_tab.is_none()
             && self.settings_menu.is_none()
             && self.tab_menu.is_none()
@@ -2053,6 +2103,19 @@ impl Render for SpritXApp {
                     }
                     cx.stop_propagation();
                     return;
+                }
+                if this.modal.is_none() && this.file_preview_has_focus() {
+                    let leaf = this.file_preview_focused.unwrap();
+                    if key == "escape" {
+                        this.close_file_preview(leaf, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if (mods.control || mods.platform) && !mods.alt && !mods.shift && key == "c" {
+                        this.copy_file_preview(leaf, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                 }
                 if key == "escape" && this.close_top_overlay() {
                     if this.terminal_has_focus() {

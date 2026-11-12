@@ -44,6 +44,13 @@ encrypted link.
   live refresh by bounded background polling (~1 s for a create/delete in
   the tree; no filesystem watcher), and context-menu actions
   (list / open / view / edit) driven by command templates.
+- Left-click a file to open its read-only preview beside the active terminal
+  pane. Previews belong to that pane, including inside splits. Right-click a
+  file to insert its shell-quoted path without running it; Shift+right-click
+  opens the file action menu. Folder expand/collapse and folder menus remain.
+  Text/code previews include line numbers, scrolling and copy; common image
+  formats can also be previewed. Use the preview's close button or Escape
+  while the preview has focus to return to the terminal.
 - Command history in `~/.config/spritx/history.jsonl`, searchable from the
   command palette with filters such as `failed`, `ok`, `here`, `cwd:`,
   `project:` and `branch:`.

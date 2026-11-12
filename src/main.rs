@@ -185,7 +185,13 @@ fn main() {
                 spritx_terminal::screens::app_shell::process_control_test(main_window, cx);
             }
 
-            if std::env::var_os("SPRITX_SMOKE").is_some() && std::env::var_os("SPRITX_TAB_TEST").is_none() {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("SPRITX_FILE_PREVIEW_TEST").is_some() {
+                spritx_terminal::screens::app_shell::file_preview_test(main_window, cx);
+            }
+
+            if std::env::var_os("SPRITX_SMOKE").is_some() && std::env::var_os("SPRITX_TAB_TEST").is_none()
+                && std::env::var_os("SPRITX_FILE_PREVIEW_TEST").is_none() {
                 cx.spawn(async move |cx| {
                     gpui::Timer::after(std::time::Duration::from_secs(3)).await;
                     let _ = cx.update(|cx| cx.quit());

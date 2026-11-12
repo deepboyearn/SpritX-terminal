@@ -6,6 +6,7 @@
 pub mod config;
 pub mod cli_activity;
 pub mod files;
+pub mod file_preview;
 pub mod git;
 pub mod history;
 pub mod osc;

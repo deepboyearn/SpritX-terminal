@@ -6,3 +6,4 @@ pub mod overlays;
 pub mod pane_tree;
 pub mod tab_bar;
 mod tab_motion;
+mod file_preview;

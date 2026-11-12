@@ -353,6 +353,7 @@ fn render_leaf(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                this.file_preview_focused = None;
                 // Look the tab up by id (captured above), not by a
                 // render-time index that a tab close could have shifted.
                 if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
@@ -581,7 +582,10 @@ fn render_leaf(
         id,
     ));
 
-    pane.into_any_element()
+    div().id(("pane-with-preview", id as usize)).flex().flex_1().min_w_0().min_h_0()
+        .overflow_hidden().child(pane)
+        .when(app.file_previews.contains_key(&id), |row| row.child(super::file_preview::render(app, id, cx)))
+        .into_any_element()
 }
 
 fn render_live_terminal(

@@ -317,7 +317,7 @@ fn record_realloc(old: usize, old_size: usize, new: usize, new_size: usize) {
 }
 
 fn clamp_sub(counter: &AtomicU64, value: u64) {
-    let _ = counter.fetch_update(Relaxed, Relaxed, |current| {
+    let _ = counter.try_update(Relaxed, Relaxed, |current| {
         Some(current.saturating_sub(value))
     });
 }

@@ -296,6 +296,115 @@ The terminal pump processes PTY output into the `vt100` screen model. Shell mark
 
 File discovery, preview loading and terminal startup/teardown use background work to keep blocking filesystem/process operations out of interactive UI handlers. Preview requests carry pane and request identities, so a late result cannot overwrite a newer selection or reopen a removed preview.
 
+### Developer workflow: follow the code
+
+The repository map below locates files. These flows show **what runs first, which module receives the next step, and where the result becomes visible**.
+
+#### 1. Application startup and session recovery
+
+```mermaid
+flowchart TD
+    Launch["Launch SpritX: main.rs"] --> Claim["desktop.rs: claim the profile's desktop instance"]
+    Claim --> Existing{"Instance already running?"}
+    Existing -->|Yes| Show["Send Show to the existing window and exit the second launch"]
+    Existing -->|No| Init["Create GPUI window and SpritXApp"]
+    Init --> Config["backend/config.rs: load preferences"]
+    Config --> Workspace["screens/workspace.rs: restore tabs, splits and saved sessions"]
+    Workspace --> Owner{"Saved session owner available?"}
+    Owner -->|Yes| Attach["terminal.rs: attach to the retained session"]
+    Owner -->|No| Spawn["Start a new owner and shell for the pane"]
+    Attach --> Ready["Render workspace and start output/status pumping"]
+    Spawn --> Ready
+```
+
+Start reading at [`main.rs`](src/main.rs), then [`desktop.rs`](src/desktop.rs) and `SpritXApp::new` in [`app_shell.rs`](src/screens/app_shell.rs). Recovery is implemented by `restore_workspace` and `restore_pane_session` in [`screens/workspace.rs`](src/screens/workspace.rs); the saved format lives in [`backend/workspace.rs`](src/backend/workspace.rs).
+
+An explicitly saved empty workspace stays empty. The diagram's session recovery steps apply only when there are panes to restore.
+
+Session owners use the same executable with the internal `--session-owner` argument. `main.rs` routes that mode directly to `backend/session_owner.rs` instead of creating another GPUI window.
+
+#### 2. Keyboard input, process output and rendering
+
+```mermaid
+sequenceDiagram
+    participant UI as app_shell.rs
+    participant Keys as keys.rs
+    participant Session as terminal.rs
+    participant Owner as session_owner.rs
+    participant Process as PTY and shell or CLI
+    participant View as pane_tree.rs
+    UI->>UI: Resolve shortcut, overlay and active-pane focus
+    UI->>Keys: Encode terminal keystroke
+    Keys-->>UI: Terminal bytes
+    UI->>Session: write_active / TerminalSession.write
+    Session->>Owner: Send input to this pane's persistent owner
+    Owner->>Process: Write bytes to native PTY / ConPTY
+    Process-->>Owner: Output bytes and process state
+    Owner-->>Session: Output stream or recovery snapshot
+    UI->>Session: pump_terminals / pump_bytes
+    Session->>Session: Update vt100 screen model
+    Session-->>UI: Bytes for OSC lifecycle and cwd tracking
+    UI->>UI: Update history, Recent, activity and completion state
+    UI->>View: Notify GPUI to redraw the changed state
+    View->>Session: Read visible rows, cursor and selection
+```
+
+This is the normal persistent local-session path. Smoke tests use direct local PTY sessions, which bypass the owner connection. Rendering reads the parsed screen; it does not execute the command or interpret a second copy of the raw output.
+
+To trace a terminal bug, follow `type_key` → `write_active` in [`app_shell.rs`](src/screens/app_shell.rs), then `TerminalSession::write` / `pump_bytes` in [`terminal.rs`](src/terminal.rs). Command/cwd markers are handled by [`backend/osc.rs`](src/backend/osc.rs); visible row layout and mouse-to-cell mapping live in [`pane_tree.rs`](src/screens/pane_tree.rs).
+
+#### 3. File click to pane-local preview or terminal path
+
+```mermaid
+flowchart TD
+    Click["file_tree.rs: file row click"] --> Button{"Mouse action"}
+    Button -->|Left| Capture["Capture active pane ID and a new request ID"]
+    Capture --> Loading["screens/file_preview.rs: show loading panel"]
+    Loading --> Read["Background task: backend/file_preview.rs reads bounded content"]
+    Read --> Current{"Pane and request still current?"}
+    Current -->|Yes| Render["Update only that pane's text or image preview"]
+    Current -->|No| Discard["Ignore the stale result"]
+    Button -->|Right| Quote["platform.rs: quote path for the active shell"]
+    Quote --> Insert["send_to_terminal with execute=false"]
+    Insert --> Prompt["Path appears in the active terminal; no Enter is sent"]
+    Button -->|Shift + right| Menu["Open the existing file action menu"]
+```
+
+[`file_tree.rs`](src/screens/file_tree.rs) chooses the interaction. [`screens/file_preview.rs`](src/screens/file_preview.rs) owns the pane/request identity, loading state, slide transition and close behavior. [`backend/file_preview.rs`](src/backend/file_preview.rs) only loads and validates content. [`pane_tree.rs`](src/screens/pane_tree.rs) places the viewer beside its owning terminal.
+
+Keep preview state keyed by **leaf/pane ID**, not cwd or filename. Keep file reads off the UI thread, and check request identity again before applying an async result. The viewer has its own input focus so ordinary typing into a focused preview is not forwarded to the shell.
+
+#### 4. Workspace, activity and remote event flows
+
+| Event | Code path | Result |
+| --- | --- | --- |
+| New tab or split | `app_shell.rs` action → `state.rs` pane tree → `terminal.rs` / `session_owner.rs` | An independent terminal session is assigned to a new pane ID. New-tab startup runs in the background. |
+| Shell changes directory | Shell integration → `terminal.rs` output → `backend/osc.rs` → `app_shell.rs` | Update the owning pane's cwd and the corresponding file-tree context. |
+| CLI produces work or finishes | Output/input activity → `backend/cli_activity.rs`; confirmed completion → OSC/process status → `screens/workspace.rs` / `platform.rs` | Update the tab/Recent indicator; emit configured completion notifications. Silence alone is not completion. |
+| Workspace checkpoint | `screens/workspace.rs::checkpoint_workspace` → serialized snapshot → `backend/config.rs` background writer | Save layout, Recent and session reconnection data without doing the durable write in an interactive UI handler. |
+| Window closes to background | `main.rs` close handler → `prepare_for_background` → `desktop.rs` | Checkpoint, retain the running instance and hide/minimize its window. |
+| Explicit desktop quit | Tray action → `screens/workspace.rs::quit_desktop` | Flush pending state and stop owned sessions before quitting. |
+| Phone sends input | Browser client → sealed frame → `backend/remote_server.rs` → `app_shell.rs::pump_remote` → target `TerminalSession` | The same host-side terminal receives the input. |
+| Host sends remote output | Terminal pump → remote server screen/output bridge → sealed frame → browser renderer | Remote clients receive the host's output; remote sessions do not spawn duplicate local shells. |
+| Native SpritX connects remotely | Pairing link in palette → `backend/remote_client.rs` → remote pane in `terminal.rs` | Render and control a session owned by the other SpritX host. |
+
+#### 5. Where to make a change
+
+| Change | Start here | Relevant verification |
+| --- | --- | --- |
+| Input, control keys or process interrupts | [`keys.rs`](src/keys.rs), [`app_shell.rs`](src/screens/app_shell.rs), [`terminal.rs`](src/terminal.rs) | `keys_model`, `process_interrupt`, `terminal_backend` |
+| Terminal rows, cursor, wrapping or selection | [`terminal.rs`](src/terminal.rs), [`pane_tree.rs`](src/screens/pane_tree.rs) | `terminal_regressions`, `terminal_appearance`, `latency` |
+| Tabs, splits or workspace recovery | [`state.rs`](src/state.rs), [`workspace.rs`](src/screens/workspace.rs), [`session_owner.rs`](src/backend/session_owner.rs) | `state_model`, `workspace_restore`, `workspace_owner`, `tab_lifecycle` |
+| File-tree actions or previews | [`file_tree.rs`](src/screens/file_tree.rs), [preview UI](src/screens/file_preview.rs), [preview loader](src/backend/file_preview.rs) | `backend_fs_osc`, `file_preview`, `file_preview_ui` |
+| Settings, palette or desktop colors | [`overlays.rs`](src/screens/overlays.rs), [`config.rs`](src/backend/config.rs), [`theme.rs`](src/theme.rs) | `backend_config_history`, `ui_smoke` |
+| Remote pairing or transport | [`remote.rs`](src/backend/remote.rs), [`remote_server.rs`](src/backend/remote_server.rs), [`remote_client.rs`](src/backend/remote_client.rs) | `backend_remote`, `backend_remote_server`, `backend_remote_client` |
+| CLI activity or launcher behavior | [`cli_activity.rs`](src/backend/cli_activity.rs), [`cli_launcher.rs`](src/screens/cli_launcher.rs) | `cli_activity` and the launcher/library tests |
+| Branding or packaged assets | [`build.rs`](build.rs), [`assets.rs`](src/assets.rs), [`assets/`](assets/) | Asset/library tests and a packaged binary check |
+
+For a feature change: identify the owning pane/action → update the view and state transition → put blocking work in the backend/background executor → add focused regression coverage → run the relevant model/backend tests → run display tests when the change affects layout or interaction. The commands and display-test opt-ins are listed in [Development and testing](#development-and-testing).
+
+The asset path is separate from terminal execution: `build.rs` embeds icon/brand tables and compiles the Windows icon resource → `assets.rs` exposes embedded data to GPUI → views load it without depending on the source checkout. For distribution, the test workflow validates the commit first, and the manually dispatched release workflow builds the platform packages.
+
 ### Repository map
 
 ```text

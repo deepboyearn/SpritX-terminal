@@ -98,6 +98,7 @@ fn main() {
             let main_window = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    app_id: Some(std::env::var("FLATPAK_ID").unwrap_or_else(|_| "spritx-terminal".into())),
                     ..Default::default()
                 },
                 |window, cx| {

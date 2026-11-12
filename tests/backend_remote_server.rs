@@ -472,13 +472,13 @@ fn index_page_is_served_and_fails_closed() {
         response.contains("will not fall back to plaintext"),
         "the page must document that it refuses to downgrade"
     );
-    assert_eq!(
-        http_get(harness.server.port(), "/favicon.ico")
-            .lines()
-            .next()
-            .unwrap(),
-        "HTTP/1.1 204 No Content"
-    );
+    assert!(response.contains("<link rel=\"icon\" href=\"/favicon.ico\""));
+    assert!(response.contains("<img src=\"/app-icon.png\" alt=\"SpritX\""));
+    for (path, content_type) in [("/favicon.ico", "image/x-icon"), ("/app-icon.png", "image/png")] {
+        let asset = http_get(harness.server.port(), path);
+        assert!(asset.starts_with("HTTP/1.1 200"), "missing app artwork: {path}");
+        assert!(asset.to_ascii_lowercase().contains(&format!("content-type: {content_type}")));
+    }
 }
 
 #[test]

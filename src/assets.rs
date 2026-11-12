@@ -10,8 +10,14 @@ include!(concat!(env!("OUT_DIR"), "/icons.rs"));
 /// have to be inside it.
 pub struct Assets;
 
+pub const APP_LOGO: &str = "app/logo.png";
+pub const DISCORD_INVITE: &str = "https://discord.gg/ecyzVxaSfV";
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == APP_LOGO {
+            return Ok(Some(Cow::Borrowed(include_bytes!("../assets/icon-128.png"))));
+        }
         if let Some((_, bytes)) = BRAND_IMAGES.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(*bytes)));
         }
@@ -26,7 +32,9 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let dir = path.trim_end_matches('/');
-        Ok(if dir == "brands" {
+        Ok(if dir == "app" {
+            vec!["logo.png".into()]
+        } else if dir == "brands" {
             BRAND_IMAGES.iter().map(|(name, _)| SharedString::from(
                 name.strip_prefix("brands/").unwrap_or(name).to_string()
             )).collect()
@@ -44,6 +52,22 @@ impl AssetSource for Assets {
 #[cfg(test)]
 mod brand_tests {
     use super::*;
+
+    #[test]
+    fn app_logo_and_discord_icon_are_available_without_source_files() {
+        let bytes = Assets.load(APP_LOGO).unwrap().expect("embedded application logo");
+        let logo = image::load_from_memory(&bytes).unwrap().into_rgba8();
+        assert_eq!(logo.dimensions(), (128, 128));
+        assert_eq!(logo.get_pixel(0, 0)[3], 0, "outer white background must be transparent");
+        assert!(logo.pixels().any(|p| p[3] == 255 && p[0] > 100 && p[2] > 200 && p[2] > p[1]),
+            "purple artwork was lost or recolored");
+        assert!(logo.pixels().any(|p| p[3] == 255 && p[1] > 200 && p[0] < 120),
+            "mint keyboard was lost or recolored");
+        let discord = Assets.load("icons/IconDiscord.svg").unwrap().expect("embedded Discord icon");
+        let svg = std::str::from_utf8(&discord).unwrap();
+        assert!(svg.contains("viewBox=\"0 0 24 24\""));
+        assert_eq!(svg.matches("<path ").count(), 4);
+    }
 
     fn pixels(name: &str) -> image::RgbaImage {
         let data = Assets.load(&format!("brands/{name}.png")).unwrap().unwrap();

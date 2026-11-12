@@ -54,6 +54,9 @@ windows-sys = { version = "0.61", features = ["Win32_System_Registry", "Win32_UI
 [patch.crates-io]
 xattr = { path = "vendor/xattr" }
 
+[build-dependencies]
+embed-resource = "3.0"
+
 # ---------------------------------------------------------------------------
 # Packages. Both are built by .github/workflows/release.yml — `cargo deb` and
 # `cargo generate-rpm` read these tables, so the workflow only has to call them.

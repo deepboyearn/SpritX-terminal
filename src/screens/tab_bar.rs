@@ -43,6 +43,9 @@ pub fn render(app: &SpritXApp, window_active: bool, cx: &mut Context<SpritXApp>)
         .gap(px(6.))
         .bg(theme.outer)
         .when(!app.file_tree_visible, |bar| bar.child(render_lead(app, cx)))
+        .when(!app.file_tree_visible, |bar| bar.child(
+            div().pb(px(6.)).child(gpui::img(crate::assets::APP_LOGO).size(px(24.)).flex_none())
+        ))
         .child(render_tabs(app, window_active, cx))
         .child(div().pb(px(4.)).child(render_new_group(app, cx)))
         .child(div().flex_1())
@@ -600,6 +603,11 @@ fn render_actions(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                     )
                 }),
         )
+        .child(
+            icon_button("tb-discord", Icon::Discord, &theme, false)
+                .tooltip(move |_, cx| cx.new(move |_| CommunityTooltip { theme }).into())
+                .on_click(cx.listener(|_, _, _, cx| cx.open_url(crate::assets::DISCORD_INVITE))),
+        )
         .child(divider(&theme))
         .child(
             icon_button("tb-layouts", Icon::Layouts, &theme, app.layouts_open).on_click(
@@ -624,6 +632,16 @@ fn render_actions(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
             )),
         )
         .into_any_element()
+}
+
+struct CommunityTooltip { theme: Theme }
+
+impl gpui::Render for CommunityTooltip {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().px(px(9.)).py(px(6.)).rounded(px(6.))
+            .bg(self.theme.bg).text_color(self.theme.fg).text_size(px(12.))
+            .child("Join SpritX on Discord")
+    }
 }
 
 /// Tab context menu (C47–C52), rendered on the root overlay layer.

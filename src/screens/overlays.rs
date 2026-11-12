@@ -2195,8 +2195,7 @@ fn settings_content(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement 
                                 .justify_center()
                                 .size(px(46.))
                                 .rounded(px(10.))
-                                .bg(theme.accent.opacity(0.14))
-                                .child(icon(Icon::Appearance, 24.0, theme.accent)),
+                                .child(gpui::img(crate::assets::APP_LOGO).size(px(46.)).flex_none()),
                         )
                         .child(
                             div()

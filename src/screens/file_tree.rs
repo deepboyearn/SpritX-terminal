@@ -1392,7 +1392,7 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(icon(Icon::Blocks, 16.0, theme.fg))
+                    .child(gpui::img(crate::assets::APP_LOGO).size(px(24.)).flex_none())
                     .child(
                         div()
                             .text_size(px(13.))

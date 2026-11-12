@@ -1,0 +1,2 @@
+// Native Windows executable icon, also used by the window and taskbar.
+1 ICON "icon.ico"

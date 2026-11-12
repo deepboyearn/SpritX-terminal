@@ -1030,7 +1030,14 @@ async fn serve(
     let app = Router::new()
         .route("/", get(index))
         .route("/ws", get(ws_handler))
-        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }))
+        .route("/favicon.ico", get(|| async {
+            ([(header::CONTENT_TYPE, "image/x-icon"), (header::CACHE_CONTROL, "no-cache")],
+             include_bytes!("../../assets/icon.ico").as_slice())
+        }))
+        .route("/app-icon.png", get(|| async {
+            ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-cache")],
+             include_bytes!("../../assets/icon-128.png").as_slice())
+        }))
         .with_state(WeakState(state));
     let _ = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -2034,6 +2041,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
 <title>SpritX Remote</title>
+<link rel="icon" href="/favicon.ico"/>
+<link rel="apple-touch-icon" href="/app-icon.png"/>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" integrity="sha384-tStR1zLfWgsiXCF3IgfB3lBa8KmBe/lG287CL9WCeKgQYcp1bjb4/+mwN6oti4Co" crossorigin="anonymous"/>
 <style>
   html,body{margin:0;height:100%;background:#0e1014;overflow:hidden;overscroll-behavior:none;font:13px system-ui,sans-serif;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}
@@ -2132,7 +2141,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 </head>
 <body>
 <div id="app">
-  <div id="bar"><button id="back" title="Terminals" style="display:none">&#9776;</button><span id="msg">Connecting…</span><span id="dim"></span><button id="fdec" title="Smaller text (more columns)">A&#8722;</button><button id="finc" title="Bigger text">A+</button><button id="mobile-theme" type="button">Dark</button><button id="mobile-sound" type="button" aria-pressed="false">Sound off</button><button id="dc" style="display:none">Disconnect</button></div>
+  <div id="bar"><img src="/app-icon.png" alt="SpritX" width="22" height="22" style="flex:none"/><button id="back" title="Terminals" style="display:none">&#9776;</button><span id="msg">Connecting…</span><span id="dim"></span><button id="fdec" title="Smaller text (more columns)">A&#8722;</button><button id="finc" title="Bigger text">A+</button><button id="mobile-theme" type="button">Dark</button><button id="mobile-sound" type="button" aria-pressed="false">Sound off</button><button id="dc" style="display:none">Disconnect</button></div>
   <div id="tabbar"><div id="sessions" aria-label="Terminals"></div><button id="new-session" aria-label="New terminal">+</button></div>
   <div id="job-alert" class="sr-only" role="status"></div>
   <div id="term"></div>

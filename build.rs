@@ -11,6 +11,13 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+    println!("cargo:rerun-if-changed=assets/app-icon.rc");
+    println!("cargo:rerun-if-changed=assets/icon-128.png");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_resource::compile_for("assets/app-icon.rc", ["spritx-terminal"], embed_resource::NONE)
+            .manifest_required().expect("compile the Windows application icon");
+    }
     let dir = Path::new("assets/icons");
     println!("cargo:rerun-if-changed={}", dir.display());
     println!("cargo:rerun-if-changed=build.rs");

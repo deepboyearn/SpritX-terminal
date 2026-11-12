@@ -10,8 +10,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/legacy7838-create/SpritX-terminal/actions/workflows/test.yml"><img src="https://github.com/legacy7838-create/SpritX-terminal/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
+  <a href="https://github.com/deepboyearn/spritx-terminal/actions/workflows/test.yml"><img src="https://github.com/deepboyearn/spritx-terminal/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license" /></a>
+  <a href="https://hits.sh/github.com/deepboyearn/spritx-terminal/"><img src="https://hits.sh/github.com/deepboyearn/spritx-terminal.svg?label=README%20hits&amp;color=8b5cf6" alt="README hits counted by Hits.sh" /></a>
+  <a href="https://github.com/deepboyearn/spritx-terminal/watchers"><img src="https://img.shields.io/github/watchers/deepboyearn/spritx-terminal?style=flat&amp;label=Watchers" alt="GitHub watchers" /></a>
+</p>
+
+<p align="center">
+  <sub>README hits count badge requests from when the counter was added, not unique visitors or past visits; image caching and repeat requests affect the count. Watchers subscribe to repository notifications, not a live online count.</sub>
 </p>
 
 <p align="center">

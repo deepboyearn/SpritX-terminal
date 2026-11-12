@@ -107,6 +107,8 @@ pub struct SpritXApp {
     pub settings_section: crate::state::SettingsSection,
     pub palette_query: String,
     pub palette_selected: usize,
+    pub(super) palette_scroll: ScrollHandle,
+    pub(super) palette_scroll_selection: std::cell::RefCell<Option<(PaletteMode, String, usize)>>,
     pub theme_names: Vec<&'static str>,
     pub selected_theme: usize,
     /// Which Settings dropdown/inline list is expanded (Font, Cursor style,
@@ -231,6 +233,8 @@ impl SpritXApp {
             },
             palette_query: String::new(),
             palette_selected: 0,
+            palette_scroll: ScrollHandle::new(),
+            palette_scroll_selection: Default::default(),
             theme_names: crate::state::sample_theme_names(),
             selected_theme: theme_index_for(&app_config.appearance.theme),
             settings_menu: None,
@@ -1349,6 +1353,8 @@ impl SpritXApp {
     }
 
     pub fn open_palette(&mut self, mode: PaletteMode, cx: &mut Context<Self>) {
+        *self.palette_scroll_selection.borrow_mut() = None;
+        self.palette_scroll.set_offset(gpui::point(px(0.), px(0.)));
         crate::metrics::event(&format!(
             "action.open_palette mode={}",
             match mode {

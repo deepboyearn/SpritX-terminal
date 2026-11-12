@@ -850,13 +850,12 @@ fn history_meta(entry: &HistoryEntry) -> String {
 
 fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp>) -> AnyElement {
     let theme = app.theme;
-    let (sigil, placeholder, title) = match mode {
+    let (placeholder, title) = match mode {
         PaletteMode::Command => (
-            None,
-            "Search actions, tabs, themes…",
+            "Find an action…",
             "Command palette",
         ),
-        PaletteMode::History => (Some("!"), "Search command history…", "Command history"),
+        PaletteMode::History => ("Search command history…", "Command history"),
     };
 
     let query_empty = app.palette_query.trim().is_empty();
@@ -866,77 +865,53 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
         app.palette_query.clone()
     };
 
-    let mut header = div()
-        .flex()
-        .items_center()
-        .gap(px(10.))
-        .px(px(14.))
-        .py(px(12.))
+    let header = div()
+        .flex().flex_col().flex_none()
+        .gap(px(12.))
+        .p(px(16.))
         .border_b_1()
-        .border_color(theme.border);
-
-    header = match sigil {
-        Some("!") => header.child(
-            div()
-                .w(px(16.))
-                .flex()
-                .justify_center()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(15.))
-                .text_color(theme.warning)
-                .child("!"),
-        ),
-        _ => header.child(
-            div()
-                .w(px(16.))
-                .flex()
-                .justify_center()
-                .child(icon(
-                    match mode {
-                        PaletteMode::History => Icon::History,
-                        PaletteMode::Command => Icon::Search,
-                    },
-                    16.0,
-                    theme.accent,
-                )),
-        ),
-    };
-
-    header = header
+        .border_color(theme.border)
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap(px(2.))
+            div().flex().items_center().justify_between()
                 .child(
-                    div()
-                        .text_size(px(13.5))
-                        .text_color(if query_empty { theme.fg_dim } else { theme.fg })
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(query_display),
+                    div().flex().items_center().gap(px(8.))
+                        .child(icon(if mode == PaletteMode::History { Icon::History } else { Icon::Ssh }, 16., theme.fg_dim))
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.fg).child(title)),
                 )
                 .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(theme.fg_dim)
-                        .child(match mode {
-                            PaletteMode::Command => "Actions, tabs, hosts and recent commands",
-                            PaletteMode::History => "Insert with Enter · run with Shift+Enter",
-                        }),
+                    div().id("palette-dismiss").cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| dismiss_modal(this, cx)))
+                        .child(kbd(theme, "Esc")),
                 ),
         )
-        .child(esc_chip(theme));
+        .child(
+            div().id("palette-query").flex().items_center().gap(px(12.))
+                .h(px(44.)).px(px(12.)).rounded(px(8.))
+                .bg(theme.outer).cursor_text()
+                .child(icon(Icon::Search, 16., theme.fg_dim))
+                .child(div().flex_1().min_w_0().text_size(px(14.))
+                    .text_color(if query_empty { theme.fg_dim } else { theme.fg })
+                    .overflow_hidden().whitespace_nowrap().text_ellipsis().child(query_display))
+                .when(!query_empty, |field| field.child(
+                    div().id("palette-clear").flex().items_center().justify_center()
+                        .size(px(24.)).rounded(px(4.)).cursor_pointer()
+                        .hover(|s| s.bg(theme.white_06))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.palette_query.clear();
+                            this.palette_selected = 0;
+                            cx.notify();
+                        }))
+                        .child(icon(Icon::X, 14., theme.fg_dim)),
+                )),
+        );
 
     let mut sections: Vec<AnyElement> = Vec::new();
     let mut history_count = 0usize;
+    let mut selected_list_item = 0;
 
     match mode {
         PaletteMode::Command => {
-            sections.push(section_header(theme, "Actions"));
             let rows = app.palette_rows_filtered();
             let selected_position = app.palette_selected.min(rows.len().saturating_sub(1));
             if rows.is_empty() {
@@ -944,19 +919,25 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
             }
             for (position, (index, (ic, label, shortcut))) in rows.into_iter().enumerate() {
                 let selected = position == selected_position;
-                let sub = if shortcut == "›" {
-                    "Open sub-menu"
-                } else if shortcut.is_empty() {
-                    "Open remote control"
-                } else {
-                    "Run action"
+                let group = match index {
+                    0..=2 => "Terminal",
+                    3..=4 => "Workspace",
+                    5..=7 => "Tools",
+                    _ => "Connection",
                 };
+                let previous_group = sections.last().is_some();
+                // Keep action order and original dispatch indices intact.
+                // Filtered searches form a single result group.
+                if position == 0 || (query_empty && matches!(index, 3 | 5)) {
+                    sections.push(palette_group_header(theme,
+                        if query_empty { group } else { "Results" }, previous_group));
+                }
+                if selected { selected_list_item = sections.len(); }
                 sections.push(palette_action_row(
                     theme,
                     ("palette-row", index),
                     ic,
                     label,
-                    sub,
                     shortcut,
                     selected,
                     cx,
@@ -965,7 +946,7 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
             }
         }
         PaletteMode::History => {
-            sections.push(section_header(theme, "Recent commands"));
+            sections.push(palette_group_header(theme, "Recent commands", false));
             let entries: Vec<HistoryEntry> = app
                 .history
                 .as_ref()
@@ -985,6 +966,7 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
             }
             for (index, entry) in entries.iter().take(200).enumerate() {
                 let selected = index == selected_position;
+                if selected { selected_list_item = sections.len(); }
                 let command = entry.command.clone();
                 let cwd = display_cwd(entry.cwd.as_deref());
                 let meta = history_meta(entry);
@@ -994,18 +976,18 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .mx(px(6.))
+                    .flex_none()
                     .px(px(10.))
                     .py(px(7.))
-                    .rounded(px(6.))
+                    .rounded(px(8.))
                     .border_1()
                     .border_color(if selected {
-                        theme.accent.opacity(0.35)
+                        theme.border
                     } else {
                         theme.white_04.opacity(0.0)
                     })
-                    .when(selected, |d| d.bg(theme.accent.opacity(0.12)))
-                    .hover(|s| s.bg(theme.white_06))
+                    .when(selected, |d| d.bg(theme.outer))
+                    .when(!selected, |d| d.hover(|s| s.bg(theme.white_04)))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let command = command.clone();
@@ -1059,50 +1041,48 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
         }
     }
 
+    let selection = (mode, app.palette_query.clone(), app.palette_selected);
+    if app.palette_scroll_selection.borrow().as_ref() != Some(&selection) {
+        app.palette_scroll.scroll_to_item(selected_list_item);
+        *app.palette_scroll_selection.borrow_mut() = Some(selection);
+    }
     let list = div()
         .id("palette-list")
         .flex()
         .flex_col()
         .flex_1()
         .min_h_0()
-        .p(px(6.))
-        .gap(px(1.))
+        .p(px(8.))
+        .gap(px(2.))
         .overflow_y_scroll()
+        .track_scroll(&app.palette_scroll)
         .children(sections);
 
-    let body = match mode {
-        PaletteMode::History => footer_row(
-            theme,
-            hints(vec![
+    let body = div().flex().flex_none().items_center().justify_between()
+        .gap(px(12.)).px(px(16.)).py(px(12.))
+        .border_t_1().border_color(theme.border).bg(theme.outer)
+        .child(match mode {
+        PaletteMode::History => hints(vec![
                 hint(theme, "↵", "insert"),
                 hint(theme, "⇧↵", "run"),
                 hint(theme, "Esc", "close"),
             ]),
-            div()
-                .text_size(px(10.5))
-                .text_color(theme.fg_dim)
-                .child(format!("{} results", history_count))
-                .into_any_element(),
-        ),
-        PaletteMode::Command => footer_row(
-            theme,
-            hints(vec![
+        PaletteMode::Command => hints(vec![
                 hint(theme, "↑↓", "navigate"),
-                hint(theme, "↵", "run"),
-                hint(theme, "Esc", "close"),
+                hint(theme, "↵", "select"),
             ]),
-            div()
-                .text_size(px(10.5))
-                .text_color(theme.fg_dim)
-                .child(title)
-                .into_any_element(),
-        ),
-    };
+    })
+        .child(div().text_size(px(11.)).text_color(theme.fg_dim)
+            .child(match mode {
+                PaletteMode::History => format!("{history_count} commands"),
+                PaletteMode::Command => format!("{} actions", app.palette_rows_filtered().len()),
+            }));
 
-    let panel = card(
-        theme,
-        640.0,
-        div()
+    let panel = div().flex().flex_col().w(px(600.)).max_w(relative(0.92))
+        .max_h(relative(0.78)).rounded(px(16.))
+        .bg(theme.bg).border_1().border_color(theme.border)
+        .overflow_hidden().occlude()
+        .child(div()
             .flex()
             .flex_col()
             .flex_1()
@@ -1110,10 +1090,15 @@ fn render_palette(app: &SpritXApp, mode: PaletteMode, cx: &mut Context<SpritXApp
             .child(header)
             .child(list)
             .child(body)
-            .into_any_element(),
-    );
+        ).into_any_element();
 
     modal_layer("palette-modal", theme, panel, cx)
+}
+
+fn palette_group_header(theme: Theme, label: &'static str, separated: bool) -> AnyElement {
+    div().flex_none().px(px(12.)).pt(px(if separated { 12. } else { 4. }))
+        .pb(px(4.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM)
+        .text_color(theme.fg_dim).child(label).into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1122,7 +1107,6 @@ fn palette_action_row(
     id: impl Into<ElementId>,
     ic: Icon,
     label: impl Into<String>,
-    sub: &'static str,
     shortcut: &'static str,
     selected: bool,
     cx: &mut Context<SpritXApp>,
@@ -1131,30 +1115,30 @@ fn palette_action_row(
     let mut row = div()
         .id(id)
         .flex()
+        .flex_none()
         .items_center()
-        .gap(px(10.))
-        .mx(px(6.))
-        .px(px(10.))
-        .h(px(36.))
-        .rounded(px(6.))
+        .gap(px(12.))
+        .px(px(12.))
+        .h(px(40.))
+        .rounded(px(8.))
         .border_1()
         .border_color(if selected {
-            theme.accent.opacity(0.35)
+            theme.border
         } else {
             theme.white_04.opacity(0.0)
         })
-        .when(selected, |d| d.bg(theme.accent.opacity(0.12)))
-        .hover(|s| s.bg(theme.white_06))
+        .when(selected, |d| d.bg(theme.outer))
+        .when(!selected, |d| d.hover(|s| s.bg(theme.white_04)))
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
         .child(
             div()
-                .w(px(18.))
+                .w(px(20.)).flex_none()
                 .flex()
                 .justify_center()
                 .child(icon(
                     ic,
-                    15.0,
+                    16.0,
                     if selected { theme.accent } else { theme.fg_dim },
                 )),
         )
@@ -1166,22 +1150,22 @@ fn palette_action_row(
                 .min_w_0()
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(13.))
                         .text_color(theme.fg)
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .child(label.into()),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(theme.fg_dim)
-                        .child(sub),
                 ),
         );
 
-    if !shortcut.is_empty() {
+    if shortcut == "›" {
+        row = row.child(icon(Icon::ChevronRight, 14., theme.fg_dim));
+    } else if shortcut.contains("Ctrl") {
+        let caps = div().flex().flex_none().items_center().gap(px(4.))
+            .children(shortcut.split('+').map(|key| kbd(theme, key)));
+        row = row.child(caps);
+    } else if !shortcut.is_empty() {
         row = row.child(
             div()
                 .text_size(px(10.))
@@ -1190,7 +1174,9 @@ fn palette_action_row(
         );
     }
 
-    row.into_any_element()
+    row.child(div().flex().flex_none().items_center().justify_center().w(px(16.))
+        .when(selected, |d| d.child(icon(Icon::Enter, 14., theme.accent))))
+        .into_any_element()
 }
 
 // ---------------------------------------------------------------------------

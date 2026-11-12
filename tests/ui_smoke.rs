@@ -14,6 +14,11 @@ fn run_smoke(modal: Option<&str>) {
     // UI verification must not write settings or pairing data into a real profile.
     cmd.env(if cfg!(windows) { "APPDATA" } else { "XDG_CONFIG_HOME" }, &config_root);
     cmd.env("SPRITX_SMOKE", "1");
+    if modal == Some("palette-light") {
+        std::fs::create_dir_all(config_root.join("spritx")).unwrap();
+        std::fs::write(config_root.join("spritx/config.toml"),
+            "[appearance]\nlightWorkspace = true\n").unwrap();
+    }
     if modal == Some("file-tree") {
         let fixture = config_root.join("file-tree-project-测试");
         std::fs::create_dir_all(&fixture).unwrap();
@@ -21,7 +26,7 @@ fn run_smoke(modal: Option<&str>) {
         cmd.env("HOME", &fixture).env("USERPROFILE", &fixture);
     }
     if let Some(modal) = modal {
-        cmd.env("SPRITX_OPEN", modal);
+        cmd.env("SPRITX_OPEN", if modal == "palette-light" { "palette" } else { modal });
     }
     let status = cmd.status().expect("launch spritx-terminal");
     let _ = std::fs::remove_dir_all(config_root);
@@ -61,6 +66,12 @@ fn completion_notification_settings_exits_cleanly() {
 #[ignore = "requires SPRITX_UI_TESTS=1 and a display; run with --ignored"]
 fn palette_modal_exits_cleanly() {
     run_smoke(Some("palette"));
+}
+
+#[test]
+#[ignore = "requires a display; run with --ignored"]
+fn palette_light_modal_exits_cleanly() {
+    run_smoke(Some("palette-light"));
 }
 
 /// Covers the pairing panel with a real QR encoder and the "SpritX you drive"

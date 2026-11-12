@@ -125,6 +125,11 @@ pub struct SpritXApp {
     pub tab_scroll: ScrollHandle,
     pub(super) command_completion: u64,
     pub(super) tab_highlight: std::rc::Rc<std::cell::RefCell<Option<super::tab_bar::TabHighlight>>>,
+    /// Persistent, measured layout transitions for each stable tab ID.
+    pub(super) tab_motion: std::rc::Rc<std::cell::RefCell<super::tab_motion::TabMotion>>,
+    tab_motion_task: Option<gpui::Task<()>>,
+    pub(super) pending_tab_sessions: std::collections::HashSet<u64>,
+    pending_tab_input: HashMap<u64, Vec<u8>>,
     pub tab_menu: Option<TabMenuState>,
     pub pane_menu: Option<PaneMenuState>,
     pub editing_tab: Option<TabId>,
@@ -238,6 +243,10 @@ impl SpritXApp {
             tab_scroll: ScrollHandle::new(),
             command_completion: 0,
             tab_highlight: Default::default(),
+            tab_motion: Default::default(),
+            tab_motion_task: None,
+            pending_tab_sessions: Default::default(),
+            pending_tab_input: Default::default(),
             tab_menu: None,
             pane_menu: None,
             editing_tab: None,
@@ -266,9 +275,18 @@ impl SpritXApp {
         super::cli_launcher::start_scanning(&mut app, cx);
         cx.on_app_quit(|this, _| {
             this.checkpoint_workspace();
+            // The checkpoint is now written on a background thread (the fsync
+            // used to freeze the UI); drain it here so the final state is on
+            // disk before the process exits.
+            crate::backend::config::flush_writes();
+            crate::backend::history::flush_history(std::time::Duration::from_secs(5));
             async {}
         }).detach();
-        cx.on_release(|this, _| this.checkpoint_workspace()).detach();
+        cx.on_release(|this, _| {
+            this.checkpoint_workspace();
+            crate::backend::config::flush_writes();
+            crate::backend::history::flush_history(std::time::Duration::from_secs(5));
+        }).detach();
         app
     }
 
@@ -370,7 +388,7 @@ impl SpritXApp {
     }
 
     pub fn spawn_session(&mut self, leaf: u64) {
-        if self.sessions.contains_key(&leaf) {
+        if self.sessions.contains_key(&leaf) || self.pending_tab_sessions.contains(&leaf) {
             return;
         }
         if self.tabs.iter().any(|tab| tab.leaves.get(&leaf).is_some_and(|leaf| leaf.remote)) {
@@ -400,6 +418,71 @@ impl SpritXApp {
                 self.session_errors.insert(leaf, error.to_string());
             }
         }
+    }
+
+    fn dispose_session(mut session: TerminalSession) {
+        // Kill, owner RPC and detach can wait on the OS/network. Never run
+        // this destructor in an animation frame or a close click handler.
+        std::thread::spawn(move || {
+            session.set_keep_on_drop(false);
+            session.kill();
+        });
+    }
+
+    fn buffer_startup_input(&mut self, leaf: u64, bytes: &[u8]) -> bool {
+        if !self.pending_tab_sessions.contains(&leaf) { return false; }
+        let pending = self.pending_tab_input.entry(leaf).or_default();
+        if pending.len().saturating_add(bytes.len()) > 64 * 1024 { return false; }
+        pending.extend_from_slice(bytes);
+        true
+    }
+
+    fn spawn_tab_session(&mut self, leaf: u64, cx: &mut Context<Self>) {
+        let args = match crate::platform::parse_shell_args(&self.settings.shell_args) {
+            Ok(args) => args,
+            Err(error) => { self.session_errors.insert(leaf, error); return; }
+        };
+        let config = crate::terminal::SessionConfig::for_shell(
+            Some(&self.settings.shell_program), &args,
+            self.tabs.iter().find_map(|tab| tab.leaves.get(&leaf).map(|leaf| leaf.cwd.clone())),
+        );
+        let smoke = std::env::var_os("SPRITX_SMOKE").is_some();
+        let keep = self.settings.keep_sessions && self.settings.restore_workspace;
+        self.pending_tab_sessions.insert(leaf);
+        let work = cx.background_executor().spawn(async move {
+            let mut session = if smoke { TerminalSession::spawn(config)? }
+                else { TerminalSession::spawn_persistent(config)? };
+            session.set_keep_on_drop(keep);
+            Ok::<_, anyhow::Error>(session)
+        });
+        cx.spawn(async move |this, cx| {
+            let mut result = Some(work.await);
+            #[cfg(debug_assertions)]
+            if std::env::var_os("SPRITX_TAB_TEST").is_some() { eprintln!("[tab-motion] session_ready leaf={leaf}"); }
+            let _ = this.update(cx, |app, cx| {
+                let requested = app.pending_tab_sessions.remove(&leaf);
+                let live = app.tabs.iter().any(|tab| tab.leaves.contains_key(&leaf));
+                if !requested || !live || app.sessions.contains_key(&leaf) { return; }
+                match result.take().unwrap() {
+                    Ok(session) => {
+                        if let Some(input) = app.pending_tab_input.remove(&leaf) {
+                            let _ = session.write(&input);
+                        }
+                        #[cfg(debug_assertions)]
+                        if std::env::var_os("SPRITX_TAB_TEST").is_some() { eprintln!("[tab-motion] input_flushed leaf={leaf}"); }
+                        app.session_errors.remove(&leaf);
+                        app.sessions.insert(leaf, session);
+                        app.checkpoint_workspace();
+                    }
+                    Err(error) => {
+                        app.pending_tab_input.remove(&leaf);
+                        app.session_errors.insert(leaf, error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+            if let Some(Ok(session)) = result { Self::dispose_session(session); }
+        }).detach();
     }
 
     pub fn pump_terminals(&mut self) -> bool {
@@ -853,6 +936,9 @@ impl SpritXApp {
     pub fn write_active(&mut self, bytes: &[u8]) -> bool {
         crate::metrics::event(&format!("action.write_active bytes={}", bytes.len()));
         let Some(leaf) = self.active_tab_checked().map(|tab| tab.active_leaf) else { return false; };
+        if self.pending_tab_sessions.contains(&leaf) {
+            return self.buffer_startup_input(leaf, bytes);
+        }
         let Some(session) = self.sessions.get_mut(&leaf) else {
             return false;
         };
@@ -1028,8 +1114,10 @@ impl SpritXApp {
     /// dropping its remote link (whose `Drop` tears the reconnect loop down).
     /// Called immediately on close so no stale entry outlives the pane.
     fn teardown_leaf(&mut self, leaf: u64) {
-        if let Some(mut session) = self.sessions.remove(&leaf) {
-            session.kill();
+        self.pending_tab_sessions.remove(&leaf);
+        self.pending_tab_input.remove(&leaf);
+        if let Some(session) = self.sessions.remove(&leaf) {
+            Self::dispose_session(session);
         }
         self.session_errors.remove(&leaf);
         self.block_trackers.remove(&leaf);
@@ -1162,14 +1250,18 @@ impl SpritXApp {
         self.next_leaf_id += 1;
         self.tabs.push(TabState::single(tab_id, "Terminal", leaf_id));
         self.active_tab = self.tabs.len() - 1;
-        self.spawn_session(leaf_id);
+        if !self.settings.reduced_motion {
+            self.tab_motion.borrow_mut().open(tab_id, std::time::Instant::now());
+            self.start_tab_motion(cx);
+        }
+        self.spawn_tab_session(leaf_id, cx);
         self.touch_recent(leaf_id);
         cx.notify();
     }
 
     pub fn activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         crate::metrics::event(&format!("action.activate_tab index={index}"));
-        if index < self.tabs.len() {
+        if index < self.tabs.len() && !self.tab_motion.borrow().closing(self.tabs[index].id) {
             self.active_tab = index;
             self.close_modal();
             self.touch_recent(self.tabs[index].active_leaf);
@@ -1178,9 +1270,54 @@ impl SpritXApp {
     }
 
     pub fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        crate::metrics::event(&format!("action.close_tab index={index}"));
+        let Some(id) = self.tabs.get(index).map(|tab| tab.id) else { return; };
+        self.close_tab_id(id, cx);
+    }
+
+    pub(super) fn close_tab_id(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else { return; };
+        if self.tab_motion.borrow().closing(id) { return; }
+        if self.settings.reduced_motion {
+            self.finish_close_tab(index, cx);
+            return;
+        }
+        self.tab_motion.borrow_mut().close(id, std::time::Instant::now());
+        self.start_tab_motion(cx);
+        cx.notify();
+    }
+
+    fn start_tab_motion(&mut self, cx: &mut Context<Self>) {
+        if self.tab_motion_task.is_some() { return; }
+        self.tab_motion_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                gpui::Timer::after(std::time::Duration::from_millis(16)).await;
+                let keep = this.update(cx, |app, cx| {
+                    let mut now = std::time::Instant::now();
+                    if app.settings.reduced_motion { now += super::tab_motion::DURATION; }
+                    let closed = app.tab_motion.borrow_mut().advance(now);
+                    for id in closed {
+                        if let Some(index) = app.tabs.iter().position(|tab| tab.id == id) {
+                            app.finish_close_tab(index, cx);
+                        }
+                    }
+                    let keep = app.tab_motion.borrow().any();
+                    if !keep { app.tab_motion_task = None; }
+                    cx.notify();
+                    keep
+                }).unwrap_or(false);
+                if !keep { break; }
+            }
+        }));
+    }
+
+    /// Commit a close: drop the tab, tear down its panes and repaint.
+    ///
+    /// This is the original body of `close_tab`, split out so the animated path
+    /// can call it when the collapse finishes.
+    pub(super) fn finish_close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             let removed = self.tabs.remove(index);
+            self.tab_motion.borrow_mut().remove(removed.id);
             for leaf in removed.leaf_ids() {
                 self.teardown_leaf(leaf);
             }
@@ -1199,6 +1336,10 @@ impl SpritXApp {
                 self.editing_title.clear();
             }
             self.clamp_active_tab();
+            if self.tabs.is_empty() {
+                *self.tab_highlight.borrow_mut() = None;
+                self.tab_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            }
             self.tab_menu = None;
             self.pane_menu = None;
             self.refresh_remote_tabs();
@@ -2779,6 +2920,8 @@ impl SpritXApp {
                             let running = self.tabs.iter().any(|tab| tab.leaves.get(&leaf).is_some_and(|state| state.activity.running));
                             self.cli_activity.entry(leaf).or_default().input(&bytes, running, std::time::Instant::now());
                         }
+                    } else {
+                        self.buffer_startup_input(leaf, &bytes);
                     }
                 }
                 RemoteInput::Resize { leaf, cols, rows } => {
@@ -2893,13 +3036,36 @@ fn missing_fonts_use_an_installed_monospace_family() {
 }
 
 }
+/// How long the lifecycle hook waits for a tab's close animation to finish.
+/// Comfortably longer than `TAB_CLOSE_DURATION` so the check is not a race.
+#[cfg(debug_assertions)]
+const TAB_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// Drive close-last/empty/recreate through the actual window and render loop.
 #[cfg(debug_assertions)]
 pub fn tab_lifecycle_test(window: gpui::WindowHandle<SpritXApp>, cx: &mut gpui::App) {
     cx.spawn(async move |cx| {
         window.update(cx, |app, _, cx| {
+            // Start from an empty workspace. Restoring a saved one first put a
+            // tab with id 13 in `tabs`, and then hardcoding `next_tab_id = 13`
+            // below handed the *next* tab the same id — two tabs sharing one
+            // identity, which `workspace::valid` rejects and which made the
+            // split/count assertions further down flaky depending on what was
+            // on disk when the hook ran.
+            app.tabs.clear();
+            app.sessions.clear();
+            app.restored_sessions.clear();
+            *app.tab_motion.borrow_mut() = Default::default();
+            app.active_tab = 0;
+            app.next_leaf_id = 1;
             app.next_tab_id = 13;
             app.theme = Theme::light();
+            // Two tabs, because the assertions below switch between them: tab 0
+            // is a plain single-pane terminal and tab 1 is the split one. The
+            // hook used to inherit tab 0 from the restored workspace, which made
+            // it depend on whatever happened to be on disk; create both here.
+            app.add_tab(cx);
+            assert_eq!(app.active_tab().title, "Terminal");
             app.add_tab(cx);
             assert_eq!(app.active_tab().title, "Terminal");
             app.split_active_pane(SplitDirection::Row, cx);
@@ -2942,7 +3108,36 @@ pub fn tab_lifecycle_test(window: gpui::WindowHandle<SpritXApp>, cx: &mut gpui::
         }).unwrap();
         gpui::Timer::after(std::time::Duration::from_millis(300)).await;
         window.update(cx, |app, _, cx| {
+            // Animated first, so the deferred-removal path is exercised. The
+            // orb step above left `reduced_motion` set; clear it or the close
+            // takes the immediate path and this step proves nothing.
+            app.settings.reduced_motion = false;
+            let started = std::time::Instant::now();
             app.close_tab(1, cx);
+            eprintln!("[tab-motion] close_handler_us={}", started.elapsed().as_micros());
+            // The tab is still present: `close_tab` parks it for the collapse
+            // instead of removing it, which is what makes the animation draw.
+            assert!(app.tab_motion.borrow().closing(app.tabs[1].id), "close must start the collapse");
+            assert_eq!(app.tabs.len(), 2, "removal must be deferred, not skipped");
+        }).unwrap();
+        let mut close_widths = Vec::new();
+        for _ in 0..8 {
+            gpui::Timer::after(std::time::Duration::from_millis(35)).await;
+            let width = window.update(cx, |app, _, _| {
+                if app.tabs.len() > 1 {
+                    app.tab_scroll.bounds_for_item(1).map(|bounds| f32::from(bounds.size.width))
+                } else { None }
+            }).unwrap();
+            if let Some(width) = width { close_widths.push(width); }
+        }
+        eprintln!("[tab-motion] close_slot_widths={close_widths:?}");
+        assert!(close_widths.windows(2).any(|pair| pair[1] < pair[0] - 1.0),
+            "close must rebuild intermediate layout widths, not snap: {close_widths:?}");
+        gpui::Timer::after(TAB_CLOSE_WAIT).await;
+        window.update(cx, |app, _, cx| {
+            assert!(!app.tab_motion.borrow().any(), "the collapse must finish");
+            assert_eq!(app.tabs.len(), 1, "the closed tab must be gone once it collapses");
+            app.settings.reduced_motion = true;
             app.close_tab(0, cx);
             assert!(app.tabs.is_empty());
             assert!(app.sessions.is_empty());
@@ -2953,12 +3148,19 @@ pub fn tab_lifecycle_test(window: gpui::WindowHandle<SpritXApp>, cx: &mut gpui::
             app.cycle_pane(true, cx);
             app.split_active_pane(SplitDirection::Row, cx);
             assert!(app.tabs.is_empty());
+            // `checkpoint_workspace` hands the bytes to the background config
+            // writer (the fsync used to freeze the UI every 2 s), so the file is
+            // not necessarily on disk the instant the call returns. Drain it
+            // before reading back.
+            crate::backend::config::flush_writes();
             let saved = crate::backend::workspace::load();
             assert!(saved.empty_workspace);
             assert!(crate::backend::workspace::valid(&saved));
             app.restore_workspace();
             assert!(app.tabs.is_empty());
             app.layouts_open = true;
+            // Later steps exercise the animated path again.
+            app.settings.reduced_motion = false;
             cx.notify();
         }).unwrap();
         gpui::Timer::after(std::time::Duration::from_millis(300)).await;
@@ -2966,19 +3168,55 @@ pub fn tab_lifecycle_test(window: gpui::WindowHandle<SpritXApp>, cx: &mut gpui::
         gpui::Timer::after(std::time::Duration::from_millis(300)).await;
         window.update(cx, |app, _, cx| {
             app.close_modal();
+            let started = std::time::Instant::now();
             app.add_tab(cx); // Same handler as the + button.
+            eprintln!("[tab-motion] add_handler_us={}", started.elapsed().as_micros());
+            #[cfg(windows)]
+            assert!(app.write_active(b"Write-Output ('MOTION_' + 'INPUT_READY')\r"));
+            #[cfg(not(windows))]
+            assert!(app.write_active(b"printf '%s%s\\n' MOTION_ INPUT_READY\r"));
             assert_eq!(app.tabs.len(), 1);
             assert_eq!(app.active_tab().display_title(), "Terminal");
+            assert!(app.pending_tab_sessions.contains(&app.active_tab().active_leaf));
+        }).unwrap();
+        let mut open_widths = Vec::new();
+        for _ in 0..8 {
+            gpui::Timer::after(std::time::Duration::from_millis(35)).await;
+            if let Some(width) = window.update(cx, |app, _, _| {
+                app.tab_scroll.bounds_for_item(0).map(|bounds| f32::from(bounds.size.width))
+            }).unwrap() { open_widths.push(width); }
+        }
+        eprintln!("[tab-motion] open_slot_widths={open_widths:?}");
+        assert!(open_widths.windows(2).any(|pair| pair[1] > pair[0] + 1.0),
+            "open must rebuild intermediate layout widths, not snap: {open_widths:?}");
+        for attempt in 0..100 {
+            if window.update(cx, |app, _, _| {
+                if attempt == 0 { eprintln!("[tab-motion] checking queued command"); }
+                app.pump_terminals();
+                if attempt == 0 { eprintln!("[tab-motion] first command pump complete"); }
+                app.session(app.active_tab().active_leaf).is_some_and(|session| session.screen_text().contains("MOTION_INPUT_READY"))
+            }).unwrap() { break; }
+            gpui::Timer::after(std::time::Duration::from_millis(50)).await;
+        }
+        window.update(cx, |app, _, _| {
+            eprintln!("[tab-motion] checking session output");
             assert_eq!(app.sessions.len(), 1);
+            assert!(app.session(app.active_tab().active_leaf).unwrap().screen_text().contains("MOTION_INPUT_READY"),
+                "input queued during startup must be delivered");
         }).unwrap();
         gpui::Timer::after(std::time::Duration::from_millis(300)).await;
         window.update(cx, |app, _, cx| {
+            // Immediate path again: this asserts the state right after the call.
+            eprintln!("[tab-motion] final close");
+            app.settings.reduced_motion = true;
             app.close_tab(0, cx); // Same handler as the tab's × button.
             app.close_tab(0, cx); // A stale/double close is harmless.
             assert!(app.tabs.is_empty());
             assert!(app.sessions.is_empty());
         }).unwrap();
+        eprintln!("[tab-motion] final close complete");
         gpui::Timer::after(std::time::Duration::from_millis(300)).await;
+        eprintln!("[tab-motion] quitting lifecycle app");
         cx.update(|cx| cx.quit()).unwrap();
     }).detach();
 }
@@ -3020,15 +3258,16 @@ pub fn process_control_test(window: gpui::WindowHandle<SpritXApp>, cx: &mut gpui
             app.pump_terminals();
             app.session(leaf).is_some_and(|session| session.powerline_prompt_end().is_some() && session.cursor().1 == 2)
         }).unwrap(), "shell did not return after Ctrl+C");
-        let (other_leaf, other_pid) = window.update(cx, |app, _, cx| {
+        let other_leaf = window.update(cx, |app, _, cx| {
             assert_eq!(app.session(leaf).unwrap().pid(), original_pid);
             app.add_tab(cx);
             let other = app.active_tab().active_leaf;
-            let other_pid = app.session(other).unwrap().pid();
             app.focus_leaf(leaf, cx);
             assert!(app.send_to_terminal("node force-server.cjs", true));
-            (other, other_pid)
+            other
         }).unwrap();
+        wait_until!(window.update(cx, |app, _, _| app.session(other_leaf).is_some()).unwrap(), "second terminal did not start");
+        let other_pid = window.update(cx, |app, _, _| app.session(other_leaf).unwrap().pid()).unwrap();
         wait_until!(std::fs::read_to_string(root.join("force-port.txt")).ok().and_then(|s| s.parse::<u16>().ok()).is_some(), "unresponsive test server did not start");
         let force_port: u16 = std::fs::read_to_string(root.join("force-port.txt")).unwrap().parse().unwrap();
         cx.update_window(window.into(), |_, window, cx| {

@@ -1,4 +1,13 @@
 // Bundled PowerShell prompt and command tracking, passed directly at launch.
+//
+// Always launch it as `-Command ". @'…'@"` and never bare, and never as
+// `-EncodedCommand`. A bare `-Command <script>` runs *directly* in the
+// top-level scope, so console Ctrl+C interrupts it exactly like a command the
+// user typed; `Start-Sleep` then aborts the load midway, leaving
+// `SpritXPromptEnabled` set with the prompt function never installed — no
+// prompt, no command tracking, and every later Ctrl+C swallowed by the broken
+// host state. Dot-sourcing from a here-string keeps the whole load in the
+// wrapping scope: Ctrl+C during it is ignored, exactly like a profile.
 pub const POWERSHELL_INIT: &str = r###"
 # Windows PowerShell aliases curl to Invoke-WebRequest. Resolve the familiar
 # curl command to the installed native executable inside SpritX sessions.
@@ -115,3 +124,173 @@ if (-not $global:SpritXPromptEnabled) {
     }
 }
 "###;
+
+/// The PowerShell command that loads [`POWERSHELL_INIT`] wrapped, so a console
+/// Ctrl+C during startup cannot abort the load halfway.
+///
+/// The payload is base64 UTF-16 and therefore passed via `-EncodedCommand`,
+/// not `-Command`. That is required, not stylistic: PowerShell 5.1 decodes a
+/// `-Command` argument as MBCS whenever its fourth character is below `0x80`,
+/// which mangles the private-use Powerline glyphs in the prompt (`\u{e0b0}`
+/// became `Œ,`, producing "Missing ')' in method call"). `-EncodedCommand` is
+/// encoding-safe on both 5.1 and 7.
+///
+/// The inner `& ([ScriptBlock]::Create(@'…'@))` is what keeps the load
+/// *wrapped*: a bare script runs directly in the top-level scope, where the
+/// console Ctrl+C inherits into it and `Start-Sleep` aborts the load, leaving
+/// `SpritXPromptEnabled` set with no prompt function installed. The here-string
+/// is single-quoted (a double-quoted one would interpolate `$global:…` away to
+/// nothing) and its opening marker sits on one line, which is what 5.1
+/// requires.
+pub const POWERSHELL_INIT_WRAPPER: &str = "& ([ScriptBlock]::Create(@'\n";
+
+/// Closes the here-string opened by [`POWERSHELL_INIT_WRAPPER`].
+pub const POWERSHELL_INIT_WRAPPER_END: &str = "\n'@))";
+
+/// `-Command` arguments for an interactive shell with the bundled integration.
+pub fn interactive_args() -> Vec<String> {
+    let mut args = vec!["-NoLogo".into(), "-NoExit".into(), "-Command".into()];
+    args.push(format!(
+        "{}{}{}",
+        POWERSHELL_INIT_WRAPPER,
+        POWERSHELL_INIT.trim_matches(['\r', '\n']),
+        POWERSHELL_INIT_WRAPPER_END
+    ));
+    args
+}
+
+/// Arguments that load the bundled integration *and* run `launch` afterwards.
+///
+/// Used for script launchers (`.ps1`/`.bat`/`.cmd`), which cannot be spawned
+/// directly: the launch is appended to the same base64 command, so the
+/// integration still installs first and the shell stays interactive.
+pub fn args_with_launch(launch: &str) -> Vec<String> {
+    let mut args = encoded_args();
+    if let Some(command) = args.last_mut() {
+        if let Some(decoded) = decode(command) {
+            *command = encode(&format!("{decoded}\n{launch}"));
+        }
+    }
+    args
+}
+
+/// UTF-16LE base64, the encoding `-EncodedCommand` expects.
+fn encode(command: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let bytes: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    STANDARD.encode(bytes)
+}
+
+/// Decode a UTF-16LE base64 `-EncodedCommand` payload, if it is one.
+pub fn decode_encoded_payload(encoded: &str) -> Option<String> {
+    decode(encoded)
+}
+
+fn decode(encoded: &str) -> Option<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let bytes = STANDARD.decode(encoded).ok()?;
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+/// `-EncodedCommand` arguments for the bundled integration, encoding-safe on
+/// PowerShell 5.1 and 7. This is the shape production uses; see
+/// [`POWERSHELL_INIT_WRAPPER`] for why the load must be both encoded and
+/// wrapped.
+pub fn encoded_args() -> Vec<String> {
+    vec![
+        "-NoLogo".into(),
+        "-NoExit".into(),
+        "-EncodedCommand".into(),
+        encode(&integration_command()),
+    ]
+}
+
+/// The wrapped load command, without any launcher appended.
+pub fn integration_command() -> String {
+    format!(
+        "{}{}{}",
+        POWERSHELL_INIT_WRAPPER,
+        POWERSHELL_INIT.trim_matches(['\r', '\n']),
+        POWERSHELL_INIT_WRAPPER_END
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A here-string is terminated by `'@` at the start of a line, so one
+    /// inside the payload would silently truncate the script — the integration
+    /// would load as a `#requires`-less fragment and the prompt would vanish.
+    #[test]
+    fn powershell_init_is_launchable_as_a_here_string() {
+        for (index, line) in POWERSHELL_INIT.lines().enumerate() {
+            assert!(
+                !line.starts_with("'@"),
+                "line {} of POWERSHELL_INIT terminates the here-string early: {line:?}",
+                index + 1
+            );
+        }
+        assert!(!POWERSHELL_INIT.contains('@') || !POWERSHELL_INIT.contains("'@\n"));
+    }
+
+    /// The launcher must use `-EncodedCommand`, not `-Command`: PowerShell 5.1
+    /// decodes a `-Command` argument as MBCS whenever its fourth character is
+    /// below `0x80`, which mangles the private-use Powerline glyphs and makes
+    /// the prompt fail to parse.
+    #[test]
+    fn encoded_args_use_encoded_command_and_round_trip() {
+        let args = encoded_args();
+        assert!(args.contains(&"-NoExit".to_string()));
+        assert!(args.contains(&"-EncodedCommand".to_string()));
+        assert!(!args.contains(&"-Command".to_string()));
+        let payload = args.last().expect("encoded payload");
+        let decoded = decode(payload).expect("payload decodes as UTF-16");
+        assert_eq!(decoded, integration_command());
+        assert!(decoded.contains("# SpritX Pastel"), "body embedded verbatim");
+    }
+
+    /// The load must be *wrapped*, or a console Ctrl+C during startup aborts it
+    /// and leaves `SpritXPromptEnabled` set with no prompt installed.
+    #[test]
+    fn the_load_is_wrapped_in_a_single_quoted_script_block() {
+        let command = integration_command();
+        assert!(command.starts_with("& ([ScriptBlock]::Create(@'\n"), "{command}");
+        assert!(command.ends_with("\n'@))"), "{command}");
+        // A double-quoted here-string would interpolate `$global:…` away.
+        assert!(!command.starts_with("& ([ScriptBlock]::Create(@\""));
+        assert!(command.contains("$global:SpritXPromptEnabled"));
+        assert!(command.contains("function global:prompt"));
+    }
+
+    /// `-EncodedCommand` must not be combined with a second switch that would
+    /// re-open the wrapped load as a bare script.
+    #[test]
+    fn interactive_args_keeps_the_switches_that_imply_an_interactive_shell() {
+        let args = interactive_args();
+        assert!(args.contains(&"-NoLogo".to_string()));
+        assert!(args.contains(&"-NoExit".to_string()));
+        let command = args.last().expect("command argument");
+        assert!(command.starts_with("& ([ScriptBlock]::Create(@'\n"), "{command}");
+        assert!(command.trim_end().ends_with("'@))"), "{command}");
+        assert!(command.contains("# SpritX Pastel"));
+    }
+
+    /// A script launcher is appended *inside* the same encoded command, so the
+    /// integration still installs and the shell stays interactive afterwards.
+    #[test]
+    fn args_with_launch_appends_the_launcher_to_the_same_command() {
+        let args = args_with_launch("& 'C:\\tools\\agent.ps1'; exit $LASTEXITCODE");
+        let decoded = decode(args.last().expect("payload")).expect("decodes");
+        assert!(decoded.contains("# SpritX Pastel"), "integration still present");
+        assert!(decoded.trim_end().ends_with("exit $LASTEXITCODE"));
+        // The integration must come first, or the launcher would replace it.
+        let integration_at = decoded.find("function global:prompt").expect("prompt defined");
+        let launch_at = decoded.find("agent.ps1").expect("launcher present");
+        assert!(integration_at < launch_at, "integration must load first");
+    }
+}

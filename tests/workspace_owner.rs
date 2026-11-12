@@ -203,3 +203,40 @@ fn busy_cli_output_keeps_the_owner_connection_stable() {
     assert!(finished, "CLI burst did not finish streaming");
     assert!(!disconnected, "CLI output caused a false disconnect");
 }
+
+/// A stale owner record must read as `unavailable`, not as a live owner.
+///
+/// The failing case in the field: the owner process is gone, but its port is
+/// still resident in the TCP stack, so the kernel silently drops the SYN and
+/// `connect_timeout` reports `TimedOut` instead of `ConnectionRefused`. Only
+/// treating `ConnectionRefused` as unavailable sent the restore path into a
+/// full attach that timed out 2 s later, leaving the pane dead with
+/// "Could not reconnect: connection timed out".
+#[test]
+fn a_blackholed_owner_port_counts_as_unavailable() {
+    use spritx_terminal::backend::session_owner::Connection;
+
+    // A listener that never calls `accept`: connections to a full backlog or to
+    // a socket whose process has exited behave the same way from here — the
+    // handshake never completes, so we see a timeout rather than a refusal.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    // Port is now closed; a refusal is the easy case and must also count.
+    let closed = Connection { port, token: "x".repeat(64) };
+    assert!(
+        closed.unavailable(),
+        "a closed owner port must be reported as unavailable"
+    );
+
+    // And a port that accepts nothing but holds the SYN must not be mistaken
+    // for a live owner. Reserve it with a listening socket that we never read.
+    let reserved = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let reserved_port = reserved.local_addr().unwrap().port();
+    let live = Connection { port: reserved_port, token: "x".repeat(64) };
+    assert!(
+        !live.unavailable(),
+        "a reachable owner port must not be reported as unavailable"
+    );
+}

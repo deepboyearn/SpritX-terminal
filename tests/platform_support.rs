@@ -187,8 +187,7 @@ mod windows {
     fn interactive_powershell_reports_command_start_and_completion() {
         use spritx_terminal::backend::osc::{OscEvent, OscParser};
 
-        let mut config = SessionConfig::for_shell(None, &[], None);
-        config.args.insert(0, "-NoProfile".into());
+        let config = SessionConfig::for_shell(None, &[], None);
         let mut session = TerminalSession::spawn(config).unwrap();
         assert!(session.wait_for_text("❯", Duration::from_secs(15)));
         session.write_str("Start-Sleep -Milliseconds 750\r").unwrap();
@@ -221,13 +220,7 @@ mod windows {
     fn interactive_powershell_accepts_commands_after_ctrl_c() {
         let config = SessionConfig::command(
             platform::default_shell(),
-            [
-                "-NoLogo".into(),
-                "-NoProfile".into(),
-                "-NoExit".into(),
-                "-Command".into(),
-                platform::POWERSHELL_INIT.into(),
-            ],
+            platform::powershell::encoded_args(),
         );
         let mut session = TerminalSession::spawn(config).unwrap();
         assert!(
@@ -240,11 +233,63 @@ mod windows {
         std::thread::sleep(Duration::from_millis(300));
         session.write(&[3]).unwrap();
         std::thread::sleep(Duration::from_millis(300));
+        // Ctrl+C leaves the interrupted line in the console's input buffer; the
+        // shell needs a newline before it will read a fresh command.
+        session.write_str("\r").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
         session
             .write_str("[Console]::WriteLine(('AFTER_' + 'INTERRUPT'))\r")
             .unwrap();
         assert!(
             session.wait_for_text("AFTER_INTERRUPT", Duration::from_secs(15)),
+            "{}",
+            session.screen_text()
+        );
+    }
+
+    /// An interrupt must not cost the prompt.
+    ///
+    /// The integration is loaded as a wrapped script (see
+    /// `POWERSHELL_INIT_WRAPPER`) rather than a bare `-Command <script>`, so the
+    /// load behaves like a profile: a console Ctrl+C cannot abort it halfway.
+    /// An aborted load is unrecoverable, because `SpritXPromptEnabled` is set
+    /// before the `prompt` function is defined — the flag stays set with no
+    /// prompt installed, so the prompt never comes back and later interrupts are
+    /// swallowed.
+    ///
+    /// Anything written while ConPTY is still initializing kills the child
+    /// outright on Windows, so this waits for the first prompt before
+    /// interrupting.
+    #[test]
+    fn interrupts_during_the_integration_load_do_not_break_the_shell() {
+        let config = SessionConfig::command(
+            platform::default_shell(),
+            platform::powershell::encoded_args(),
+        );
+        let mut session = TerminalSession::spawn(config).unwrap();
+        // PowerShell renders the first prompt only after the startup command has
+        // run, so waiting for *any* output is enough to know the load window is
+        // entered; the banner itself is suppressed by `-NoLogo`.
+        assert!(
+            session.wait_for_text("❯", Duration::from_secs(25)),
+            "integration never loaded: {}",
+            session.screen_text()
+        );
+        // Now interrupt while the shell is live but before it has run anything.
+        for _ in 0..3 {
+            session.write(&[3]).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        session.write_str("\r").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            session.wait_for_text("❯", Duration::from_secs(20)),
+            "prompt never returned after an interrupt: {}",
+            session.screen_text()
+        );
+        session.write_str("[Console]::WriteLine(('STILL_' + 'ALIVE'))\r").unwrap();
+        assert!(
+            session.wait_for_text("STILL_ALIVE", Duration::from_secs(15)),
             "{}",
             session.screen_text()
         );
@@ -296,4 +341,38 @@ mod windows {
         assert!(std::path::Path::new(cwd).is_dir(), "{cwd}");
         assert!(cwd.contains("测试"), "{cwd}");
     }
+}
+
+/// Checkpointed shell arguments must be recognised as our own integration, so a
+/// restore re-derives them instead of replaying a launch form the installed
+/// shell may reject.
+///
+/// The replay bug: a saved `-Command ". @'…'@"` from an older release is handed
+/// back verbatim, PowerShell 5.1 answers CommandNotFound, and the pane fills
+/// with the prompt script instead of a working shell.
+#[test]
+fn saved_integration_arguments_are_detected_and_users_are_not() {
+    // Exactly the shape an older checkpoint persisted.
+    let stale = vec![
+        "-NoLogo".to_string(),
+        "-NoExit".to_string(),
+        "-Command".to_string(),
+        ". @'\nif (-not $global:SpritXPromptEnabled) { $global:SpritXPromptEnabled = $true }\n'@".to_string(),
+    ];
+    assert!(platform::looks_like_integration_args(&stale));
+
+    // The current encoded form is ours too.
+    let current = platform::powershell::encoded_args();
+    assert!(platform::looks_like_integration_args(&current));
+
+    // A deliberate user override is not ours and must survive a restore.
+    let user = vec!["-NoProfile".to_string(), "-NoLogo".to_string()];
+    assert!(!platform::looks_like_integration_args(&user));
+    assert!(!platform::looks_like_integration_args(&[]));
+
+    // The bash/zsh integration marker counts as well.
+    assert!(platform::looks_like_integration_args(&[
+        "--rcfile".to_string(),
+        "/tmp/gpui-bashrc".to_string(),
+    ]));
 }

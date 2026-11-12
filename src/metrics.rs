@@ -173,6 +173,12 @@ pub fn tty_backlog() -> Option<u128> {
 }
 
 /// Named counters aggregated for the frame being built.
+///
+/// These are process-global on purpose: the PTY pump tasks bump them from
+/// outside the render, so they cannot be owned by a single frame slot. The
+/// invariant is that they are cleared as a frame *begins* (see
+/// [`frame_tick`]/[`frame_start`]) instead of when one ends, so a concurrent
+/// frame can never observe (or cause) a partial clear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Name {
     Rows = 0,
@@ -238,7 +244,7 @@ pub fn count(name: Name) -> u64 {
     COUNTERS_V[name as usize].load(Relaxed)
 }
 
-/// Reset every frame counter.
+/// Clear every frame counter, ready for the next frame to fill them.
 pub fn reset() {
     for counter in &COUNTERS_V {
         counter.store(0, Relaxed);
@@ -322,6 +328,10 @@ pub fn frame_tick(first: bool) -> u128 {
         .lock()
         .ok()
         .and_then(|mut slot| slot.replace(now));
+    // The counters are process-global (the pump tasks bump them directly), so
+    // reset them here, as the frame they belong to begins, rather than from
+    // `frame_end` where a concurrent frame's numbers would be thrown away.
+    reset();
     match previous {
         Some(previous) => {
             let gap = micros(now - previous);
@@ -366,7 +376,17 @@ pub struct FrameReport {
     pub term_cells: u64,
 }
 
+/// Per-frame scopes keyed by frame id.
+///
+/// A single shared `Option<Scope>` (and a single set of process-global
+/// counters) cannot survive the two pump tasks plus the render frames that
+/// interleave on this app: a frame that finished would clear or overwrite the
+/// sections and counters of a frame that was still being built, which is
+/// exactly when profiling is most interesting. Frames are therefore numbered at
+/// `frame_start` and each frame accumulates into its own slot; `frame_end` only
+/// ever touches its frame's slot.
 struct Scope {
+    id: u64,
     start: Option<Instant>,
     terminal: Duration,
     file_tree: Duration,
@@ -374,32 +394,105 @@ struct Scope {
     tab_bar: Duration,
 }
 
-static SCOPE: std::sync::Mutex<Option<Scope>> = std::sync::Mutex::new(None);
+/// Frames that can be in flight at once. Deeper nesting (or a `frame_start`
+/// whose `frame_end` never runs) evicts the oldest slot rather than growing.
+const SCOPE_SLOTS: usize = 8;
 
-fn scope<R>(f: impl FnOnce(&mut Option<Scope>) -> R) -> R {
-    let mut guard = SCOPE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+struct ScopeSet {
+    next: u64,
+    slots: [Option<Scope>; SCOPE_SLOTS],
+}
+
+const EMPTY_SCOPE_SLOT: Option<Scope> = None;
+
+static SCOPES: std::sync::Mutex<ScopeSet> = std::sync::Mutex::new(ScopeSet {
+    next: 0,
+    slots: [EMPTY_SCOPE_SLOT; SCOPE_SLOTS],
+});
+
+thread_local! {
+    /// The frame this thread is currently building. Kept per-thread so
+    /// simultaneous frames (the pump task and the UI task) never claim each
+    /// other's slot.
+    static FRAME_ID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with exclusive access to the frame slots.
+fn scopes<R>(f: impl FnOnce(&mut ScopeSet) -> R) -> R {
+    let mut guard = SCOPES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard)
 }
 
-/// Begin a frame.
+/// The frame id this thread owns, if any.
+fn current_frame() -> Option<u64> {
+    FRAME_ID.with(|cell| cell.get())
+}
+
+/// Begin a frame, claiming a fresh id for this thread.
 pub fn frame_start() {
-    scope(|slot| {
-        *slot = Some(Scope {
+    // Counters belong to the frame that is starting (see [`Name`]); they are
+    // deliberately not cleared in `frame_end`, where another frame's numbers
+    // could be lost.
+    reset();
+    let id = scopes(|set| {
+        let id = set.next;
+        set.next = set.next.wrapping_add(1);
+        let slot = Scope {
+            id,
             start: Some(Instant::now()),
             terminal: Duration::ZERO,
             file_tree: Duration::ZERO,
             blocks: Duration::ZERO,
             tab_bar: Duration::ZERO,
-        })
+        };
+        // Prefer a free slot; when all are taken, evict the oldest frame so a
+        // leaked `frame_start` can never wedge the profiler permanently.
+        let index = match set.slots.iter().position(Option::is_none) {
+            Some(free) => free,
+            None => {
+                let mut oldest = 0;
+                let mut oldest_id = u64::MAX;
+                for (index, slot) in set.slots.iter().enumerate() {
+                    if let Some(candidate) = slot {
+                        if candidate.id < oldest_id {
+                            oldest_id = candidate.id;
+                            oldest = index;
+                        }
+                    }
+                }
+                oldest
+            }
+        };
+        set.slots[index] = Some(slot);
+        id
     });
+    FRAME_ID.with(|cell| cell.set(Some(id)));
 }
 
 /// End a frame, printing the section split and per-frame element counts.
+///
+/// Only the frame this thread started is closed. If no frame is in flight the
+/// call is a no-op: it must not steal the slot of a frame still being built on
+/// another task, and it must not reset the counters that frame is filling. The
+/// counters a frame files are cleared by the next `frame_start`/`frame_tick`.
 pub fn frame_end() -> FrameReport {
-    let taken = scope(std::mem::take);
-    let Some(scope) = taken else {
+    let Some(frame) = current_frame() else {
         return FrameReport::default();
     };
+    let taken = scopes(|set| {
+        let index = set.slots.iter().position(|slot| {
+            slot.as_ref().is_some_and(|scope| scope.id == frame)
+        })?;
+        set.slots[index].take()
+    });
+    let Some(scope) = taken else {
+        // Another frame already consumed this slot (e.g. it was evicted): the
+        // render itself happened, but its numbers are gone. Never touch the
+        // counters here — they belong to whoever is in flight now.
+        FRAME_ID.with(|cell| cell.set(None));
+        return FrameReport::default();
+    };
+    FRAME_ID.with(|cell| cell.set(None));
     let build_us = scope.start.map(|s| micros(s.elapsed())).unwrap_or(0);
     let report = FrameReport {
         build_us,
@@ -460,8 +553,10 @@ pub fn frame_end() -> FrameReport {
             );
         }
     }
-    // Per-frame counters: clear after printing so the next frame starts clean.
-    reset();
+    // The counters are intentionally NOT cleared here: if another frame is
+    // mid-build (the pump task or a second pump), clearing them would throw
+    // away its numbers, which is what made the profiler under-report under
+    // load. `frame_tick`/`frame_start` clear them as the next frame begins.
     report
 }
 
@@ -469,11 +564,22 @@ fn section<R>(pick: impl FnOnce(&mut Scope) -> &mut Duration, f: impl FnOnce() -
     if !enabled() {
         return f();
     }
+    let frame = current_frame();
     let start = Instant::now();
     let out = f();
     let elapsed = start.elapsed();
-    scope(|slot| {
-        if let Some(scope) = slot.as_mut() {
+    let Some(frame) = frame else {
+        return out;
+    };
+    scopes(|set| {
+        // A frame other than this thread's own is in flight: attribute nothing
+        // to it and drop this sample rather than corrupting that frame's split.
+        if let Some(scope) = set
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|scope| scope.id == frame)
+        {
             *pick(scope) += elapsed;
         }
     });

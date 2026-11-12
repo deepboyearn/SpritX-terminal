@@ -108,6 +108,12 @@ fn git_cli_info(cwd: &Path) -> Option<GitInfo> {
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
+        // WHY: SpritX polls `git status` in the background (tree refresh, branch
+        // badge). A bare `git status` takes `.git/index.lock` to freshen the
+        // index stat cache, so it can make the user's own `git commit` fail with
+        // "Unable to create ... index.lock". `--no-optional-locks` forbids the
+        // optional write; reads still work and stdout parsing is unchanged.
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -156,6 +162,11 @@ pub fn git_path_statuses(cwd: impl AsRef<Path>) -> std::collections::HashMap<Pat
         return out;
     }
     let root = PathBuf::from(root_text);
+    // `-z` is deliberately NOT passed: the parser below reads newline-
+    // separated records, where each entry is one line and a rename's paths are
+    // TAB-separated. Adding `-z` would switch to NUL-separated records with no
+    // line structure, which `status.lines()` would shred — the parser rejects
+    // any record still carrying a NUL rather than keying a half-path.
     let status = match git(cwd, &["status", "--porcelain=v2", "--untracked-files=normal"]) {
         Some(status) => status,
         None => return out,
@@ -174,32 +185,72 @@ pub fn git_path_statuses(cwd: impl AsRef<Path>) -> std::collections::HashMap<Pat
 }
 
 /// Narrow one porcelain-v2 entry to its worktree-relative path and the status
-/// class the file tree badges. Ordinary (`1`), renamed (`2`), untracked (`?`),
-/// and ignored (`!`) records are understood; ignored paths never surface
-/// because the caller omits `--ignored`. A rename/copied entry names the new
-/// path after the tab, which is the path the tree holds.
+/// class the file tree badges. Ordinary (`1`), renamed/copied (`2`), unmerged
+/// (`u`), untracked (`?`), and ignored (`!`) records are understood; ignored
+/// paths never surface because the caller omits `--ignored`.
+///
+/// Every record puts the path LAST, and a path may contain spaces, so the path
+/// is taken as the whole remainder of the line rather than a single
+/// whitespace-delimited token. Rename/copy records alone carry a trailing
+/// `<TAB><origPath>`; the *target* (the new path, before the tab) is the one
+/// the tree holds, so the original after the tab is dropped — otherwise
+/// `git mv a.rs b.rs` badges the stale `a.rs`.
+///
+/// Input is newline-separated (`git status --porcelain=v2`, no `-z`). Callers
+/// must not request `-z`: NUL-separated records have no line structure and the
+/// field splitting below would misparse them. A NUL byte here means the caller
+/// asked for `-z` by mistake, so the record is rejected instead of corrupted.
 fn parse_porcelain_v2_line(line: &str) -> Option<(PathBuf, GitPathStatus)> {
+    if line.contains('\0') {
+        return None;
+    }
     if let Some(rest) = line.strip_prefix("? ") {
         return Some((PathBuf::from(rest.trim()), GitPathStatus::Untracked));
     }
     if line.starts_with('!') || line.starts_with('#') {
         return None;
     }
-    // `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` where XY is the
-    // index/worktree two-letter status. Renames/copies (`2`) insert a score
-    // field before `<orig>\t<path>`; the tree holds the new path after the tab.
-    let fields: Vec<&str> = line.splitn(10, ' ').collect();
-    if fields.len() < 9 {
-        return None;
+    // Split off one leading space-delimited field, returning it with the rest
+    // of the line untouched. The final field of each record is taken as the
+    // remainder so a path containing spaces is never truncated.
+    fn take_field(s: &str) -> Option<(&str, &str)> {
+        let idx = s.find(' ')?;
+        Some((&s[..idx], &s[idx + 1..]))
     }
-    let xy = fields[1];
+    // Skip `count` leading fields and return the whole remainder as the path.
+    // Counts are the documented fixed width of each record's middle, so the
+    // path always starts past every mode/hash/score token.
+    fn skip_fields(s: &str, count: usize) -> Option<&str> {
+        let mut tail = s;
+        for _ in 0..count {
+            tail = take_field(tail)?.1;
+        }
+        Some(tail)
+    }
+    // Kind plus XY, common to every record.
+    let (kind, rest) = take_field(line)?;
+    let (xy, rest) = take_field(rest)?;
     let status = xy_status(xy)?;
-    let path_field = if fields[0] == "2" {
-        *fields.get(9)?
-    } else {
-        fields[8]
+    let after_meta = match kind {
+        // `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` — `<sub>` plus five
+        // mode/hash fields precede the path.
+        "1" => skip_fields(rest, 6)?,
+        // `2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path><TAB><orig>`
+        // — the same six fields plus the rename score precede the path, and
+        // the remainder is still `<path><TAB><orig>`.
+        "2" => skip_fields(rest, 7)?,
+        // `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>` — `<sub>`
+        // plus seven mode/hash fields; taking the remainder as the path keeps
+        // the stage hashes out of the map.
+        "u" => skip_fields(rest, 8)?,
+        _ => return None,
     };
-    let path = path_field.rsplit('\t').next().unwrap_or(path_field);
+    // Rename/copy: the target path precedes the tab, the original follows it.
+    let path = if kind == "2" {
+        after_meta.split('\t').next()?
+    } else {
+        after_meta
+    };
     Some((PathBuf::from(path), status))
 }
 

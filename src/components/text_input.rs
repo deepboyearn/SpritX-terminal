@@ -1235,7 +1235,15 @@ mod tests {
             let end = off(r.end).max(start);
             start..end
         };
-        for (inp, want) in [((0..1),(0..0)), ((1..3),(0..5)), ((0..usize::MAX),(0..7)), ((4..1),(6..6))] {
+        // The last case builds its reversed range with a struct literal rather than `4..1`
+        // so the `clippy::reversed_empty_ranges` lint does not reject the literal; `map`
+        // still normalizes it to `6..6`, exercising the same normalize path.
+        for (inp, want) in [
+            ((0..1), (0..0)),
+            ((1..3), (0..5)),
+            ((0..usize::MAX), (0..7)),
+            ((Range { start: 4, end: 1 }), (6..6)),
+        ] {
             let got = map(inp);
             assert_eq!(got, want);
             assert_valid_slice(s, got.start, got.end);

@@ -83,6 +83,62 @@ fn list_dir_hides_dotfiles_and_sorts_dirs_first() {
 }
 
 #[test]
+fn list_dir_is_deterministic_with_mixed_names_and_hidden_filtering() {
+    let tmp = TempDir::new("fs_parallel_determinism");
+    // A mix that exercises every branch the parallel fan-out can take: real
+    // directories, plain files, a dotfile (hidden filtering), and a name with
+    // a space plus a non-ASCII character (lossy `to_string_lossy` round-trip).
+    fs::create_dir(tmp.path().join("zdir")).unwrap();
+    fs::create_dir(tmp.path().join(".hidden_dir")).unwrap();
+    fs::write(tmp.path().join("zeta.txt"), b"zzz").unwrap();
+    fs::write(tmp.path().join("Alpha.txt"), b"a").unwrap();
+    fs::write(tmp.path().join(".dotfile"), b"dot").unwrap();
+    fs::write(tmp.path().join("späce name ünicode.txt"), b"uni").unwrap();
+
+    let visible = list_dir(tmp.path(), false).unwrap();
+    let got: Vec<&str> = visible.iter().map(|e| e.name.as_str()).collect();
+    // Directories first (case-insensitive), then files (case-insensitive),
+    // with the byte-wise name as the tie-breaker — and no dot entries.
+    // `späce …` sorts before `zeta.txt` because `s` < `z`.
+    assert_eq!(got, vec!["zdir", "Alpha.txt", "späce name ünicode.txt", "zeta.txt"]);
+    assert!(!got.iter().any(|n| n.starts_with('.')));
+    // Directories report size 0; files report their real length.
+    assert_eq!(visible[0].size, 0);
+    assert_eq!(visible[1].size, 1);
+
+    // The space + non-ASCII name must round-trip exactly, not lossily.
+    let unicode = visible
+        .iter()
+        .find(|e| e.name == "späce name ünicode.txt")
+        .expect("unicode name preserved");
+    assert_eq!(unicode.path, tmp.path().join("späce name ünicode.txt"));
+
+    // The same directory listed again must produce an identical vector even
+    // though the stats now run across the rayon pool: the sort, not the
+    // collect order, defines the output.
+    let again = list_dir(tmp.path(), false).unwrap();
+    assert_eq!(visible, again);
+
+    // With hidden files shown, the dot entries appear — still dirs first, and
+    // dot names sort before letters within each group (`.` is below `A`/`z`).
+    let all = list_dir(tmp.path(), true).unwrap();
+    let all_names: Vec<&str> = all.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        all_names,
+        vec![
+            ".hidden_dir",
+            "zdir",
+            ".dotfile",
+            "Alpha.txt",
+            "späce name ünicode.txt",
+            "zeta.txt"
+        ]
+    );
+    let all_again = list_dir(tmp.path(), true).unwrap();
+    assert_eq!(all, all_again);
+}
+
+#[test]
 fn list_dir_missing_directory_errors() {
     let tmp = TempDir::new("fs_missing");
     assert!(list_dir(tmp.path().join("nope"), false).is_err());

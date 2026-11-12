@@ -4,8 +4,16 @@ use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowO
 
 use spritx_terminal::assets::Assets;
 use spritx_terminal::desktop::{self, Claim, DesktopAction, Instance, Tray};
-use spritx_terminal::memprof;
+use spritx_terminal::memprof::{self, TrackingAlloc};
 use spritx_terminal::screens::app_shell::SpritXApp;
+
+/// The counting allocator lives in `memprof`, but it is registered here rather
+/// than in the library: a `#[global_allocator]` in the lib would be inherited by
+/// every binary and test target linked against it, and any future allocator in a
+/// binary target would then be a duplicate lang item. `memprof`'s bookkeeping is
+/// inert until `memprof::init()` turns it on.
+#[global_allocator]
+static ALLOC: TrackingAlloc = TrackingAlloc;
 
 struct DesktopResources {
     instance: Instance,

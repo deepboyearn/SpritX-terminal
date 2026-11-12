@@ -107,6 +107,21 @@ pub const MAX_CONNECTIONS: usize = 16;
 pub const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024;
 /// `u64::MAX` — "no pane shared yet".
 const NO_LEAF: u64 = u64::MAX;
+/// If no frame at all arrives from a client for this long, its bridge is torn
+/// down. Browsers cannot send raw WebSocket pings, so an otherwise idle client
+/// proves liveness with its empty-text keepalive frame every
+/// [`IDLE_KEEPALIVE`] (that is all a text frame is treated as — see
+/// [`input_task`]). This is what lets the reader task end on its own instead of
+/// parking on a peer that stopped talking, and the budget is several keepalive
+/// periods so a normal idle client is never disconnected.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+/// How often the bundled page sends its empty-text keepalive; mirrored by the
+/// dead-peer window in [`input_task`]. See the mobile client's `pingTimer`.
+pub const IDLE_KEEPALIVE: Duration = Duration::from_secs(30);
+/// How long a read may take once the idle budget itself has run out. It only
+/// gives a client a moment to flush a final close frame; nothing real is waited
+/// for here, so it stays short.
+const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(2);
 
 /// Desktop wake signal. The transport tasks run on the server's own runtime, so
 /// without this a remote keystroke would sit in the input queue until the
@@ -1047,6 +1062,14 @@ async fn ws_handler(
                 .iter()
                 .any(|marker| agent.contains(marker))
         });
+    // A foreign `Origin` — or a `Host` that is not loopback — refuses the
+    // upgrade before a socket is handed out (see `upgrade_is_same_origin`). The
+    // framed transport below is authenticated either way, but a browser must not
+    // be able to *establish* a session on a user's behalf: that is what makes
+    // DNS rebinding and cross-site WebSocket hijacking useful.
+    if !upgrade_is_same_origin(&headers) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
     match weak.0.upgrade() {
         Some(state) => {
             // Refuse (do not queue) once the cap is hit: connections can sit
@@ -1066,6 +1089,73 @@ async fn ws_handler(
 
 type WsSink = futures_util::stream::SplitSink<WebSocket, Message>;
 type WsStream = futures_util::stream::SplitStream<WebSocket>;
+
+/// Whether a `/ws` upgrade request may proceed.
+///
+/// Browsers attach an `Origin` to every WebSocket handshake, so a missing
+/// `Origin` means a non-browser client — the SpritX↔SpritX driver or the test
+/// harness — which the sealed handshake still authenticates. When an `Origin`
+/// *is* present it must name the host the request was actually sent to, so the
+/// page this server serves at `/` (same-origin) and the declared loopback
+/// aliases keep working while any other site is refused.
+///
+/// `Host` is checked too, and fail-closed: it is required and must be a
+/// loopback literal or `localhost`. That covers the DNS-rebinding case (the URL
+/// says `localhost`, the `Origin` matches it, but the name a rebinding attacker
+/// points at the LAN was never in the URL) without a DNS lookup per upgrade.
+/// Only a literal IP or `localhost` is accepted, so a hostname that merely
+/// contains "127.0.0.1" is not.
+fn upgrade_is_same_origin(headers: &axum::http::HeaderMap) -> bool {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    let Some(host) = host else {
+        return false;
+    };
+    if !host_is_loopback(host) {
+        return false;
+    }
+    // The page a same-origin browser client comes from is served by this very
+    // server at `/`, so the only address it may claim is loopback.
+    match headers.get(header::ORIGIN).and_then(|value| value.to_str().ok()) {
+        None => true,
+        Some(origin) => origin_is_allowed(&origin.to_ascii_lowercase()),
+    }
+}
+
+/// The `Origin` an upgrade may name: a declared loopback alias.
+fn origin_is_allowed(origin: &str) -> bool {
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        // `null` (sandboxed/opaque origins) and `file://` are not this page.
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    host_is_loopback(authority)
+}
+
+/// Whether a `Host`/`Origin` authority is a loopback literal or `localhost`.
+fn host_is_loopback(authority: &str) -> bool {
+    let authority = authority.trim();
+    let host = match authority.rfind(']') {
+        // Bracketed IPv6 literal (`[::1]:4530`).
+        Some(end) => &authority[..=end],
+        None => authority.split(':').next().unwrap_or(authority),
+    };
+    host_authority_is_loopback(host)
+}
+
+fn host_authority_is_loopback(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    bare.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
 
 async fn send_text(sink: &mut WsSink, text: String) -> bool {
     sink.send(Message::Text(text.into())).await.is_ok()
@@ -1209,17 +1299,25 @@ async fn bridge(socket: WebSocket, state: Arc<ServerState>, mobile: bool, _permi
 
     let mut kill_conn = kill_rx;
     let mut global = global_kill;
+    // Every arm tears down *both* halves — including the member that fired. A
+    // member that merely "completed" is not necessarily dropped (a spawned task
+    // lingers until its handle does), so relying on that would leave the
+    // privileged writer, which owns the socket, parked on the runtime.
     tokio::select! {
-        _ = &mut writer => reader.abort(),
-        _ = &mut reader => writer.abort(),
-        _ = kill_conn.recv() => { writer.abort(); reader.abort(); }
+        _ = &mut writer => { reader.abort(); writer.abort(); }
+        _ = &mut reader => { reader.abort(); writer.abort(); }
+        _ = kill_conn.recv() => { reader.abort(); writer.abort(); }
         _ = global.recv() => {
-            reader.abort();
             // The writer owns the socket and sends the close frame. Bound the
             // flush so a stalled peer cannot retain a bridge indefinitely.
             if tokio::time::timeout(Duration::from_millis(100), &mut writer).await.is_err() {
                 writer.abort();
             }
+            // Abort unconditionally: in the success case the writer finished its
+            // own whole-socket close, so dropping its handle now cannot cut the
+            // flush short — it can only prevent a parked task from lingering.
+            writer.abort();
+            reader.abort();
         }
     }
     state.conns.lock().expect("conns lock").remove(&conn_id);
@@ -1336,6 +1434,12 @@ async fn send_sealed(sink: &mut WsSink, tx: &mut Half, frame: ServerFrame) -> bo
 
 /// Opens client frames (any frame that fails to authenticate kills the
 /// connection) and translates them into desktop actions.
+///
+/// The receive side is bounded by [`DEFAULT_IDLE_TIMEOUT`]: a peer that
+/// authenticates and then simply stops reading or writing used to park this
+/// task (and one of the runtime's two workers) for as long as the bridge lived.
+/// A read that goes quiet ends the task, which unblocks `bridge` and aborts the
+/// writer half too.
 async fn input_task(
     mut stream: WsStream,
     state: Arc<ServerState>,
@@ -1343,12 +1447,28 @@ async fn input_task(
     mut rx: Half,
 ) {
     loop {
-        let Some(message) = stream.next().await else {
+        // `biased` so a deadline that has already passed ends the connection
+        // before another frame is accepted: once idle, a lone keepalive does
+        // not buy the peer more time.
+        let message = tokio::select! {
+            biased;
+            _ = tokio::time::sleep(DEFAULT_IDLE_TIMEOUT) => {
+                let _ = tokio::time::timeout(IDLE_CLOSE_GRACE, stream.next()).await;
+                break;
+            }
+            message = stream.next() => message,
+        };
+        let Some(message) = message else {
             break;
         };
         let boxed = match message {
             Ok(Message::Binary(bytes)) => bytes,
-            // Post-handshake text is not part of the protocol.
+            // A keepalive is an *empty* text frame (the page's `pingTimer`):
+            // explicitly a liveness no-op, not input. Text frames are skipped
+            // here whatever they carry, but accepting the keepalive keeps that
+            // intent readable (and documents why the check is not just junk).
+            Ok(Message::Text(text)) if text.is_empty() => continue,
+            // Any other post-handshake text is not part of the protocol.
             Ok(Message::Text(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
             Ok(Message::Close(_)) | Err(_) => break,
         };
@@ -1613,17 +1733,83 @@ fn cached_probe<T: Clone>(slot: &Mutex<Option<(Instant, T)>>, probe: impl Fn() -
     value
 }
 
-/// Extract a `https://*.trycloudflare.com` base URL from a cloudflared log line.
-fn extract_trycloudflare(line: &str) -> Option<String> {
-    let pos = line.find("https://")?;
-    let rest = &line[pos..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let base = &rest[..end];
-    if base.contains(".trycloudflare.com") {
-        Some(base.to_string())
-    } else {
-        None
+/// Every `https://…` token on a line that is a usable quick-tunnel base URL.
+///
+/// cloudflared prints the tunnel's hostname in one of its log lines, but that
+/// line is attacker-influenced at the margins (a hostname advertised by the
+/// tunnel, or any other `https://` link in the log) and the published URL ends
+/// up in the pairing QR code. So rather than taking the first `https://` token
+/// and trusting it, every candidate is validated with the URL parser and the
+/// caller is told about all of them: `extract_trycloudflare` refuses ambiguity
+/// instead of guessing.
+///
+/// A candidate is accepted only when it is an `https://` URL with no userinfo
+/// (`https://user:pass@host/` would otherwise be spliced into the pairing link),
+/// no port and no path/query/fragment beyond a bare `/`, and a host that is a
+/// single DNS label — no dots — under `.trycloudflare.com`, i.e. exactly
+/// `something.trycloudflare.com`. That rejects `evil.com`, a suffix trick like
+/// `x.trycloudflare.com.evil.com`, and a host-port form like
+/// `x.trycloudflare.com:8443` (the port is not the tunnel's 443, so connecting
+/// to it would not reach this server).
+fn trycloudflare_candidates(line: &str) -> Vec<String> {
+    let rest = line;
+    let mut bases = Vec::new();
+    let mut search = 0;
+    while let Some(pos) = rest[search..].find("https://") {
+        let start = search + pos;
+        let token = &rest[start..];
+        let end = token.find(char::is_whitespace).unwrap_or(token.len());
+        let token = &token[..end];
+        search = start + token.len().max(1);
+        if let Some(base) = validate_trycloudflare_url(token) {
+            bases.push(base);
+        }
     }
+    bases
+}
+
+/// Canonical `https://<label>.trycloudflare.com` form of `token`, or `None`.
+fn validate_trycloudflare_url(token: &str) -> Option<String> {
+    let url = url::Url::parse(token).ok()?;
+    if url.scheme() != "https" {
+        return None;
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    if url.port().is_some() {
+        return None;
+    }
+    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    let host = url.host_str()?;
+    let label = host
+        .strip_suffix(".trycloudflare.com")
+        .filter(|label| !label.contains('.') && !label.is_empty())?;
+    // A quick-tunnel label is alphanumeric plus `-` only (leading/trailing `-`
+    // is a DNS detail the tunnel itself would never emit, so it is accepted
+    // rather than second-guessed; anything else is a host shape, not a label).
+    if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return None;
+    }
+    Some(format!("https://{label}.trycloudflare.com"))
+}
+
+/// The one quick-tunnel base URL on a cloudflared log line, or `None`.
+///
+/// The line is scanned for *all* candidates and ambiguous output (two distinct
+/// hostnames, or the same host written two ways) yields `None`: publishing a
+/// guess would either hand the user a dead pairing link or, worse, point the
+/// pairing target at a host the server does not control. A repeated identical
+/// hostname is not ambiguity.
+fn extract_trycloudflare(line: &str) -> Option<String> {
+    let mut candidates = trycloudflare_candidates(line);
+    candidates.dedup();
+    if candidates.len() != 1 {
+        return None;
+    }
+    candidates.pop()
 }
 
 fn spawn_tunnel(port: u16, state: &Arc<ServerState>) -> Result<Child> {
@@ -2502,9 +2688,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
           wsSend(new Uint8Array([0,5]));
           msg.innerHTML='<i class="dot"></i>Connected (encrypted)'; dc.style.display=''; settle(); openPicker();
           // Keep the WebSocket alive through Cloudflare's ~100s idle timeout.
-          // Browsers cannot send raw WS pings; an empty text frame is ignored
-          // by the server's input_task (Text frames are skipped post-handshake)
-          // and costs nothing on the PTY side.
+          // Browsers cannot send raw WS pings, so an empty text frame stands in
+          // for one: the server treats it as an explicit liveness no-op — it is
+          // never decoded as input, and it does *not* extend a connection that
+          // has gone past the server's idle deadline.
           clearInterval(pingTimer);
           pingTimer = setInterval(function(){ if(ws && ws.readyState===1) ws.send(''); }, 30000);
         } else if(m.t==='denied'){
@@ -2615,3 +2802,77 @@ const INDEX_HTML: &str = r##"<!doctype html>
 </script>
 </body>
 </html>"##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_requires_a_loopback_host_and_absent_or_same_origin() {
+        let upgrade = |host: Option<&str>, origin: Option<&str>| {
+            let mut headers = axum::http::HeaderMap::new();
+            if let Some(host) = host {
+                headers.insert(header::HOST, host.parse().expect("host header"));
+            }
+            if let Some(origin) = origin {
+                headers.insert(header::ORIGIN, origin.parse().expect("origin header"));
+            }
+            upgrade_is_same_origin(&headers)
+        };
+        // No `Origin` at all: the SpritX↔SpritX client and the test harness.
+        assert!(upgrade(Some("127.0.0.1:4530"), None));
+        assert!(upgrade(Some("localhost:4530"), None));
+        assert!(upgrade(Some("[::1]:4530"), None));
+        // The bundled page is same-origin.
+        assert!(upgrade(Some("127.0.0.1:4530"), Some("http://127.0.0.1:4530")));
+        assert!(upgrade(Some("localhost:4530"), Some("http://localhost:4530")));
+        assert!(upgrade(Some("localhost:4530"), Some("https://localhost")));
+        // A foreign site driving the user's browser must not upgrade.
+        assert!(!upgrade(Some("127.0.0.1:4530"), Some("https://evil.example")));
+        assert!(!upgrade(Some("127.0.0.1:4530"), Some("null")));
+        assert!(!upgrade(Some("127.0.0.1:4530"), Some("file:///tmp/x.html")));
+        // A rebinding target the browser may still name in `Origin`.
+        assert!(!upgrade(Some("127.0.0.1:4530"), Some("http://127.0.0.1.evil.com")));
+        assert!(!upgrade(Some("10.0.0.5:4530"), None));
+        assert!(!upgrade(Some("127.0.0.1.evil.com"), None));
+        assert!(!upgrade(Some("1270.0.0.1"), Some("http://1270.0.0.1")));
+        // No `Host` at all fails closed.
+        assert!(!upgrade(None, None));
+    }
+
+    #[test]
+    fn trycloudflare_urls_are_validated_and_ambiguity_is_refused() {
+        // The real log line still works, and is canonicalised.
+        assert_eq!(
+            extract_trycloudflare(
+                "2024-01-01T00:00:00Z INF |  https://quiet-hill-1234.trycloudflare.com  |"
+            )
+            .as_deref(),
+            Some("https://quiet-hill-1234.trycloudflare.com")
+        );
+        // A bare host with no path is the same tunnel, not a second candidate.
+        assert_eq!(
+            extract_trycloudflare("https://a-b.trycloudflare.com https://a-b.trycloudflare.com")
+                .as_deref(),
+            Some("https://a-b.trycloudflare.com")
+        );
+        // Two *different* tunnels: refuse rather than guess wrong.
+        assert_eq!(
+            extract_trycloudflare("https://one.trycloudflare.com https://two.trycloudflare.com"),
+            None
+        );
+        // Not a quick-tunnel host at all.
+        assert_eq!(extract_trycloudflare("https://evil.com/x"), None);
+        assert_eq!(extract_trycloudflare("https://x.trycloudflare.com.evil.com"), None);
+        assert_eq!(extract_trycloudflare("https://trycloudflare.com"), None);
+        assert_eq!(extract_trycloudflare("https://a.b.trycloudflare.com"), None);
+        assert_eq!(extract_trycloudflare("https://.trycloudflare.com"), None);
+        // Scheme, credentials, port and path/trailing junk are all refused.
+        assert_eq!(extract_trycloudflare("http://a.trycloudflare.com"), None);
+        assert_eq!(extract_trycloudflare("https://user:pass@a.trycloudflare.com"), None);
+        assert_eq!(extract_trycloudflare("https://a.trycloudflare.com:8443"), None);
+        assert_eq!(extract_trycloudflare("https://a.trycloudflare.com/foo"), None);
+        assert_eq!(extract_trycloudflare("https://a.trycloudflare.com?x=1"), None);
+        assert_eq!(extract_trycloudflare("https://a.trycloudflare.com#x"), None);
+    }
+}

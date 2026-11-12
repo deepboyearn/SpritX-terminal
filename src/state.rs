@@ -9,6 +9,10 @@ pub const MAX_PANES_PER_TAB: usize = 5;
 pub const MIN_SPLIT_RATIO: f32 = 0.1;
 pub const MAX_SPLIT_RATIO: f32 = 0.9;
 
+/// Ratio used when `repair` has to rebuild a corrupt split tree. Already inside
+/// the clamp range, so a rebuilt tree passes `valid()` without further work.
+const DEFAULT_RATIO: f32 = 0.5;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SplitDirection {
     Row,
@@ -357,6 +361,32 @@ impl TabState {
     /// keeping the public API. Callers MUST invoke this after load, before
     /// `valid()` — see the exact call site in the report.
     ///
+    /// Rebuild `tree` so it contains exactly `survivors`, in order.
+    ///
+    /// Used by [`Self::repair`] instead of repeated `remove_leaf` calls: leaf
+    /// ids may legitimately repeat in a corrupt tree, so "remove the id" cannot
+    /// express "keep the first occurrence", and one tree walk per removal is
+    /// quadratic on a hand-edited file with thousands of duplicates. A single
+    /// rebuild is linear and has a deterministic shape.
+    fn rebuild_with_survivors(&mut self, survivors: &[LeafId]) {
+        let mut iter = survivors.iter().copied();
+        let Some(first) = iter.next() else {
+            // `repair` guarantees at least one id before calling this.
+            self.tree = PaneNode::Leaf(1);
+            return;
+        };
+        let mut tree = PaneNode::Leaf(first);
+        for id in iter {
+            tree = PaneNode::split(
+                SplitDirection::Row,
+                DEFAULT_RATIO,
+                tree,
+                PaneNode::Leaf(id),
+            );
+        }
+        self.tree = tree;
+    }
+
     /// Produces a tab satisfying the `valid()` invariants when the tree
     /// itself passes `valid_tree` (bounded depth, ids in range, finite
     /// ratios); a too-deep tree is rebuilt as a single leaf.
@@ -379,24 +409,26 @@ impl TabState {
         // Ratios ride along with the tree: a NaN / out-of-range ratio fails
         // `valid()` too, so clamp them while the depth is known-bounded.
         clamp_split_ratios(&mut self.tree);
-        // Drop duplicate ids (keep the first occurrence in tree order) and
-        // ids past the pane cap. `remove_leaf` removes one node per call,
-        // so repeated calls collapse each duplicate to a single survivor.
-        for id in ids.clone() {
-            while ids.iter().filter(|x| **x == id).count() > 1 {
-                if !self.tree.remove_leaf(id) {
-                    break;
-                }
-                ids = self.leaf_ids();
-            }
+        // Keep the first occurrence of each id in tree order, and cap the pane
+        // count. Both passes run over the id list collected once above, so the
+        // work here is linear; only the survivors drive the tree surgery below.
+        // Capping first matters as much as deduplicating first: a set that
+        // collapses to one unique id under a huge fan-out must not pay a
+        // `remove_leaf` walk per duplicate just to end up at the same single
+        // leaf. A tree with no duplicates and no over-cap leaves is left
+        // byte-for-byte untouched.
+        let mut seen = std::collections::HashSet::new();
+        ids.retain(|id| seen.insert(*id));
+        ids.truncate(MAX_PANES_PER_TAB);
+        // Build the target tree directly from the surviving ids rather than
+        // surgically removing duplicates: removal-by-id is ambiguous (a leaf id
+        // can appear more than once), and re-walking the tree per removal is
+        // what made the old pass quadratic. Rebuilding is linear and exact.
+        let survivors = ids;
+        if bounded_leaf_ids(&self.tree, 0).unwrap_or_default() != survivors {
+            self.rebuild_with_survivors(&survivors);
         }
-        while ids.len() > MAX_PANES_PER_TAB {
-            let last = *ids.last().expect("over-cap tree has leaves");
-            if !self.tree.remove_leaf(last) {
-                break;
-            }
-            ids = self.leaf_ids();
-        }
+        let ids = survivors;
         // Prune orphan leaves (not in the repaired tree) plus entries whose
         // embedded `id` disagrees with the map key (`valid()` checks both).
         self.leaves

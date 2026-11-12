@@ -5361,6 +5361,7 @@ dependencies = [
  "portable-pty",
  "qrcode",
  "raw-window-handle",
+ "rayon",
  "serde",
  "serde_json",
  "serde_yaml",

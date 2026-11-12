@@ -284,18 +284,17 @@ fn session_config(tool: &Tool, cwd: Option<String>) -> SessionConfig {
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "bat" | "cmd" | "ps1"))
     {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        let command = format!(
-            "{}; exit $LASTEXITCODE",
+        // A script is not an executable: run it through PowerShell, and keep the
+        // bundled integration by appending the launch to the integration's own
+        // `-EncodedCommand` payload. Building the arguments here instead of
+        // spawning the script directly is what keeps the prompt, the
+        // `]133;C`/`]133;D` markers and the Ctrl+C behaviour in place for
+        // `.ps1`/`.bat`/`.cmd` launchers.
+        let launch = format!(
+            "& {}; exit $LASTEXITCODE",
             shell_command(tool, ShellKind::PowerShell).unwrap()
         );
-        let bytes: Vec<_> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        config.program = crate::platform::default_shell();
-        config.args = vec![
-            "-NoProfile".into(),
-            "-EncodedCommand".into(),
-            STANDARD.encode(bytes),
-        ];
+        config.args = crate::platform::powershell::args_with_launch(&launch);
     }
     config
 }

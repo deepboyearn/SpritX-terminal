@@ -15,6 +15,13 @@
 //! * `SPRITX_MEM_BACKTRACE=1` adds per-function attribution (a backtrace is
 //!   captured on every allocation — much slower, deep-dive only).
 //! * `SPRITX_MEM_INTERVAL=<secs>` sets the reporting cadence (default 5 s).
+//! * `SPRITX_MEM_WAIT=1` lets the reporter thread write the final report for a
+//!   process that is shutting down, so the last numbers are taken while the
+//!   main stack is still alive instead of after it has been unwound.
+//!
+//! The allocator itself is registered by the binary target (`src/main.rs`),
+//! not here: a `#[global_allocator]` in the library would be inherited by every
+//! binary and test target linked against it.
 //!
 //! What the numbers mean:
 //!
@@ -29,7 +36,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -98,6 +105,22 @@ thread_local! {
     /// interning), and those allocations must not re-enter the tracker (which
     /// would both deadlock on the shard lock and pollute the counts).
     static IN_TRACKER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Signalled by [`report_now`] when `SPRITX_MEM_WAIT=1`. The reporter thread
+/// polls it, writes the final report from a thread that is not already
+/// unwinding out of `main`, and stops so there is exactly one writer left.
+static FINAL_SIGNAL: AtomicU64 = AtomicU64::new(0);
+
+/// `SPRITX_MEM_WAIT=1`: have the reporter thread write the final report for a
+/// process that is shutting down, instead of racing it from `main`. The last
+/// report is then produced while the caller's stack (and everything only it
+/// still holds) is still alive.
+static FINAL_REPORT_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("SPRITX_MEM_WAIT").is_some());
+
+fn final_report_enabled() -> bool {
+    *FINAL_REPORT_ENABLED
 }
 
 fn shard_for(addr: usize) -> usize {
@@ -328,6 +351,8 @@ fn capture_function() -> String {
 
 /// The counting global allocator. Every path forwards to `System`; book-keeping
 /// happens only while [`tracking`] is true and not already inside the tracker.
+/// A binary target registers it with
+/// `#[global_allocator] static ALLOC: TrackingAlloc = TrackingAlloc;`.
 pub struct TrackingAlloc;
 
 unsafe impl GlobalAlloc for TrackingAlloc {
@@ -362,9 +387,6 @@ unsafe impl GlobalAlloc for TrackingAlloc {
         System.dealloc(ptr, layout)
     }
 }
-
-#[global_allocator]
-static ALLOC: TrackingAlloc = TrackingAlloc;
 
 static START: OnceLock<Instant> = OnceLock::new();
 
@@ -527,14 +549,72 @@ pub fn init() {
 
     thread::Builder::new()
         .name("spritx-mem".to_string())
-        .spawn(move || loop {
-            thread::sleep(Duration::from_secs(interval));
-            report_line();
+        .spawn(move || {
+            loop {
+                let step = if final_report_enabled() {
+                    // Opt-in: poll often enough that the reporter thread — the
+                    // one that is not unwinding out of `main` — can be the
+                    // single writer of the final report.
+                    Duration::from_millis(20)
+                } else {
+                    Duration::from_secs(interval)
+                };
+                thread::sleep(step);
+                if final_report_enabled() && FINAL_SIGNAL.load(Relaxed) != 0 {
+                    // Shutdown asked for the final report; write it here
+                    // (this thread is not unwinding out of `main`) and stop,
+                    // so `report_now` does not write a second, partial one.
+                    REPORTER_STOP.store(true, Relaxed);
+                    report_line();
+                    REPORTER_DONE.store(true, Relaxed);
+                    return;
+                }
+                if REPORTER_STOP.load(Relaxed) {
+                    REPORTER_DONE.store(true, Relaxed);
+                    return;
+                }
+                report_line();
+            }
         })
         .ok();
 }
 
-/// Print a final full report. Called after the app exits.
+/// Stop flag for the periodic reporter, and the report it writes on the way out.
+static REPORTER_STOP: AtomicBool = AtomicBool::new(false);
+static REPORTER_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Ask the periodic reporter to finish and wait for it to confirm, so exactly
+/// one writer is left on stderr instead of the reporter's text interleaving with
+/// [`report_now`].
+fn stop_reporter() {
+    REPORTER_STOP.store(true, Relaxed);
+    // The reporter checks the flag after each interval, so this can take up to
+    // one interval; it is a shutdown path.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !REPORTER_DONE.load(Relaxed) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Print a final full report. Called after the app exits. The reporter thread
+/// is stopped and joined first, so the final report is the only writer left.
+///
+/// With `SPRITX_MEM_WAIT=1` the report is written by the reporter thread instead
+/// (it polls [`FINAL_SIGNAL`]), so it happens while this caller's stack is still
+/// alive and whatever it alone still holds is still counted. That hand-off
+/// cannot deadlock: the poll below is abandoned as soon as the reporter stops.
 pub fn report_now() {
+    if final_report_enabled() {
+        FINAL_SIGNAL.fetch_add(1, Relaxed);
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while !REPORTER_STOP.load(Relaxed) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if REPORTER_STOP.load(Relaxed) {
+            // Someone else (the reporter thread) is writing the final report.
+            return;
+        }
+    }
+    stop_reporter();
     report_line();
 }

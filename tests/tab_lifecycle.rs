@@ -9,7 +9,9 @@ fn last_tab_closes_empty_workspace_renders_and_plus_recreates_terminal() {
     let started = std::time::Instant::now();
     let status = loop {
         if let Some(status) = process.try_wait().unwrap() { break status; }
-        if started.elapsed() > std::time::Duration::from_secs(30) {
+        // Includes native window/font initialization and shutdown flushes in
+        // addition to the timed transition assertions inside the app.
+        if started.elapsed() > std::time::Duration::from_secs(60) {
             let _ = process.kill();
             panic!("Empty workspace lifecycle did not finish");
         }

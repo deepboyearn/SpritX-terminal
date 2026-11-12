@@ -13,15 +13,16 @@ encrypted link.
 
 **Terminal**
 
-- Split panes (up to four per tab), tabs, and layout presets.
+- Split panes (up to five per tab), tabs, and layout presets.
 - `vt100`-based screen model with scrollback, mouse reporting passed through
   to the child, text selection, copy/paste, and alternate-screen support.
 - OSC 133 command blocks: prompt, command, output, exit code and duration are
   parsed from shell-integration markers; OSC 7 keeps track of the shell's
   working directory.
-- Ten built-in themes (SpritX Dark, Catppuccin Mocha/Latte, Dracula, Nord,
-  Tokyo Night, Gruvbox Dark, Solarized Dark, One Dark, Rosé Pine) plus a
-  fully customisable 21-colour theme block.
+- Twelve built-in themes (SpritX Light, SpritX Pastel, SpritX Dark,
+  Catppuccin Mocha/Latte, Dracula, Nord, Tokyo Night, Gruvbox Dark,
+  Solarized Dark, One Dark, Rosé Pine) plus a fully customisable 21-colour
+  theme block.
 - Configurable font family and size, cursor style (block/bar/underline),
   cursor blink and scrollback length.
 - Desktop notification when a long-running command finishes.
@@ -183,18 +184,26 @@ Remote clients can connect between Linux and Windows using the same protocol.
 
 ### Shell integration
 
-Command blocks, exit codes and the working-directory tracking come from a small
-shell-integration script that SpritX sources through a generated rc file
-(`~/.config/spritx/gpui-bashrc` for bash, `gpui-zdotdir` for zsh). The port
-looks for it next to the crate:
+Command blocks, exit codes and the working-directory tracking come from the
+bundled prompt scripts (`assets/shell/spritx-prompt.bash` and
+`assets/shell/spritx-prompt.zsh`), which carry the OSC 7 and OSC 133 markers.
+SpritX writes the script for your shell into a generated rc file under the
+config directory (`~/.config/spritx/gpui-bashrc` for bash, `gpui-zdotdir` for
+zsh) and starts the shell against that file, so your own rc still loads first.
+
+The generated rc also sources an *optional* init file, guarded with `[ -f … ]`
+so a missing path is a no-op:
 
 ```
 ../scripts/spritx-shell-init.bash
 ../scripts/spritx-shell-init.zsh
 ```
 
-Without it, SpritX starts your shell with `-l` and the terminal itself works
-exactly the same — only the block, history and cwd extras stay off.
+That path is resolved at compile time from the crate root, so the release
+packages do not ship it and do not need it — a packaged binary simply has no
+extra init file to source. When no init file is present, SpritX starts your
+shell with `-l` and the terminal itself works exactly the same — only the
+block, history and cwd extras stay off.
 
 ## Packages
 

@@ -12,8 +12,7 @@ use crate::screens::app_shell::{SpritXApp, TabMenuState};
 use crate::state::SplitDirection;
 use crate::theme::{Theme, tab_bar_h};
 
-const TAB_SLIDE_DURATION: Duration = Duration::from_millis(210);
-
+const TAB_SLIDE_DURATION: Duration = super::tab_motion::DURATION;
 pub(super) struct TabHighlight {
     tab_id: u64,
     from: Bounds<Pixels>,
@@ -96,8 +95,8 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
         .flex()
         .min_w_0()
         .items_center()
-        .gap(px(8.))
-        .px(px(8.))
+        .gap(px(0.))
+        .pl(px(8.))
         .h(px(36.))
         .overflow_x_scroll()
         .scrollbar_width(px(0.))
@@ -112,10 +111,17 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
             cx.notify();
         }));
 
+    let mut slot_scales = Vec::with_capacity(app.tabs.len());
     for (index, tab) in app.tabs.iter().enumerate() {
         let active = index == active_index;
         let panes = tab.pane_count();
         let tab_id = tab.id;
+        let (scale, width, moving, closing) = {
+            let motion = app.tab_motion.borrow();
+            (motion.scale(tab_id, Instant::now()), motion.width(tab_id),
+                motion.moving(tab_id), motion.closing(tab_id))
+        };
+        slot_scales.push(scale);
         let title = if tab.title.is_empty() {
             "Terminal".to_string()
         } else {
@@ -146,10 +152,12 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
             && tab
                 .leaves
                 .values()
-                .any(|leaf| !app.sessions.contains_key(&leaf.id));
+                .any(|leaf| !app.sessions.contains_key(&leaf.id)
+                    && !app.pending_tab_sessions.contains(&leaf.id));
 
         let mut tab_el = div()
             .id(("tab", tab_id as usize))
+            .relative()
             .flex()
             .flex_none()
             .items_center()
@@ -170,6 +178,7 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
                 d.hover(|s| s.text_color(theme.fg))
             })
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                if closing { return; }
                 if event.click_count() >= 2 {
                     this.begin_rename(index, cx);
                 } else {
@@ -192,7 +201,7 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
                 MouseButton::Middle,
                 cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.close_tab(index, cx);
+                    this.close_tab_id(tab_id, cx);
                 }),
             );
 
@@ -309,23 +318,39 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
                     .hover(|s| s.bg(theme.white_08).text_color(theme.fg))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.close_tab(index, cx);
+                        this.close_tab_id(tab_id, cx);
                     }))
                     .child(icon(Icon::X, 11.0, theme.fg_dim)),
             );
         }
 
-        strip = strip.child(tab_el);
+        let measurements = app.tab_motion.clone();
+        tab_el = tab_el
+            .when(closing, |tab| tab.w(px(width)))
+            .child(canvas(move |bounds, _, _| {
+                measurements.borrow_mut().record_width(tab_id, f32::from(bounds.size.width));
+            }, |_, _, _, _| {}).absolute().size_full().top_0().left_0());
+        // Each real tab keeps its own slot. Its trailing gap shrinks/grows with
+        // it, so there is no duplicate ghost or final one-frame gutter jump.
+        let slot = div().id(("tab-slot", tab_id as usize)).flex().flex_none().min_w_0()
+            .overflow_hidden()
+            .when(moving, |slot| slot.w(px((width + super::tab_motion::GAP) * scale)))
+            .opacity(scale)
+            .child(tab_el)
+            .child(div().flex_none().w(px(super::tab_motion::GAP)));
+        strip = strip.child(slot);
     }
 
     let scroll = app.tab_scroll.clone();
     let highlight = app.tab_highlight.clone();
+    let reduced_motion = app.settings.reduced_motion;
+    let opening_selected = app.active_tab_checked().is_some_and(|tab| app.tab_motion.borrow().opening(tab.id));
     let selected_index = active_index;
     let tab_count = app.tabs.len();
     // `active_tab_checked` is the total read path; the empty case returned
     // above, so this resolves to a real tab.
     let selected_id = app.active_tab_checked().map_or(0, |tab| tab.id);
-    if highlight.borrow().as_ref().is_none_or(|pill| pill.tab_id != selected_id) {
+    if opening_selected || highlight.borrow().as_ref().is_none_or(|pill| pill.tab_id != selected_id) {
         scroll.scroll_to_item(selected_index);
     }
     let sliding_pill = canvas(
@@ -337,6 +362,7 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
             for index in 0..tab_count.min(50) {
                 if index == selected_index { continue; }
                 if let Some(mut surface) = scroll.bounds_for_item(index) {
+                    surface.size.width = (surface.size.width - px(super::tab_motion::GAP * slot_scales[index])).max(px(0.));
                     surface.origin += offset;
                     surface.origin.y += px(4.);
                     surface.size.height -= px(8.);
@@ -353,6 +379,7 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
             let Some(mut target) = scroll.bounds_for_item(selected_index) else {
                 return;
             };
+            target.size.width = (target.size.width - px(super::tab_motion::GAP * slot_scales[selected_index])).max(px(0.));
             target.origin -= bounds.origin;
             let now = Instant::now();
             let mut state = highlight.borrow_mut();
@@ -368,6 +395,10 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
                 pill.tab_id = selected_id;
             }
             pill.target = target;
+            if reduced_motion {
+                pill.from = target;
+                pill.started = now - TAB_SLIDE_DURATION;
+            }
             let mut position = pill.position(now);
             position.origin += bounds.origin + offset;
             window.paint_quad(gpui::quad(
@@ -415,6 +446,7 @@ fn render_tabs(app: &SpritXApp, _window_active: bool, cx: &mut Context<SpritXApp
             if now.duration_since(pill.started) < TAB_SLIDE_DURATION {
                 window.request_animation_frame();
             }
+
         },
     ).absolute().size_full().top_0().left_0();
 

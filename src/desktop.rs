@@ -45,6 +45,13 @@ pub enum Claim {
     Reopened,
 }
 
+/// Result of probing the endpoint a lock holder advertised.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndpointState {
+    Alive,
+    Dead,
+}
+
 impl Instance {
     pub fn claim(root: &Path) -> Result<Claim> {
         crate::backend::session_owner::secure_directory(root)?;
@@ -60,8 +67,43 @@ impl Instance {
             Err(TryLockError::WouldBlock) => {
                 let started = std::time::Instant::now();
                 loop {
-                    if Self::send_at(&path, DesktopAction::Show).is_ok() {
-                        return Ok(Claim::Reopened);
+                    // Distinguish "the primary is alive but busy" (retry) from
+                    // "the endpoint behind the lock is dead" (stop retrying). A
+                    // dead endpoint must never make every relaunch burn the full
+                    // 5 s and then fail: the owner's accept thread can exit while
+                    // the lock is still held (`Err(_) => break` above), and
+                    // spinning on a corpse just blocks every restart. A *missing*
+                    // endpoint is different — a primary that just took the lock
+                    // has not written it yet — so that case keeps retrying.
+                    match Self::read_endpoint(&path) {
+                        Ok(endpoint) => match Self::liveness(&endpoint) {
+                            EndpointState::Alive => {
+                                if Self::send_at(&path, DesktopAction::Show).is_ok() {
+                                    return Ok(Claim::Reopened);
+                                }
+                            }
+                            // The lock's owner is either gone (in which case the
+                            // OS has already released the lock and this succeeds
+                            // on the first try) or wedged with a broken
+                            // endpoint. One immediate attempt covers the first
+                            // case; the second is a hard failure, so fail now
+                            // with an actionable message instead of retrying.
+                            EndpointState::Dead => match lock.try_lock() {
+                                Ok(()) => break,
+                                Err(TryLockError::WouldBlock) => bail!(
+                                    "SpritX is running with a dead reopen endpoint (pid {} from desktop.json); \
+                                     close the stuck process and start again",
+                                    endpoint.pid
+                                ),
+                                Err(TryLockError::Error(error)) => return Err(error.into()),
+                            },
+                        },
+                        // No endpoint yet: the owner may still be starting up.
+                        Err(_) => match lock.try_lock() {
+                            Ok(()) => break,
+                            Err(TryLockError::WouldBlock) => {}
+                            Err(TryLockError::Error(error)) => return Err(error.into()),
+                        },
                     }
                     if started.elapsed() >= Duration::from_secs(5) {
                         bail!("SpritX is already running but its reopen endpoint is unavailable");
@@ -124,18 +166,45 @@ impl Instance {
         }))
     }
 
-    pub fn send_at(path: &Path, action: DesktopAction) -> Result<()> {
-        let endpoint: Endpoint = serde_json::from_slice(&std::fs::read(path)?)?;
-        #[cfg(windows)]
-        unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(endpoint.pid);
+    /// Read the endpoint the primary wrote, if it is still there.
+    fn read_endpoint(path: &Path) -> Result<Endpoint> {
+        Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+    }
+
+    /// One cheap TCP connect probe. Deliberately a real connect and not just a
+    /// PID check: a stale `desktop.json` from a crashed process still carries a
+    /// plausible PID (or one the OS has since reused), so only proof that the
+    /// accept thread is still listening counts.
+    fn endpoint_alive(endpoint: &Endpoint) -> bool {
+        TcpStream::connect_timeout(
+            &([127, 0, 0, 1], endpoint.port).into(),
+            Duration::from_millis(200),
+        )
+        .is_ok()
+    }
+
+    /// Whether the process behind `desktop.json` can still answer.
+    fn liveness(endpoint: &Endpoint) -> EndpointState {
+        if Self::endpoint_alive(endpoint) {
+            EndpointState::Alive
+        } else {
+            EndpointState::Dead
         }
+    }
+
+    pub fn send_at(path: &Path, action: DesktopAction) -> Result<()> {
+        let endpoint = Self::read_endpoint(path)?;
         let mut stream = TcpStream::connect_timeout(
             &([127, 0, 0, 1], endpoint.port).into(),
             Duration::from_secs(2),
         )?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        // The token is the only proof this endpoint belongs to the process that
+        // wrote `desktop.json`. Handing `AllowSetForegroundWindow` a PID read
+        // from a file before that handshake would let anyone who can replace
+        // the JSON name an arbitrary process, so it happens only after the
+        // primary explicitly acknowledged our token with `OK`.
         let mut bytes = serde_json::to_vec(&Request {
             token: endpoint.token,
             action,
@@ -147,7 +216,24 @@ impl Instance {
         if line.trim() != "OK" {
             bail!("SpritX did not acknowledge the desktop action");
         }
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(endpoint.pid);
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Instance {
+    /// Keep the held OS lock alive outside `Drop`, the way a wedged owner would,
+    /// so a relaunch has to decide what to do about a lock whose endpoint is
+    /// dead instead of simply taking it. The accept thread and listener are
+    /// dropped with the rest of the instance, leaving the endpoint genuinely
+    /// unreachable.
+    pub(crate) fn leak_lock(self) -> File {
+        let instance = std::mem::ManuallyDrop::new(self);
+        unsafe { std::ptr::read(&instance._lock) }
     }
 }
 
@@ -406,5 +492,67 @@ mod tests {
         );
         drop(second);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A port nothing is listening on, for a stale `desktop.json`.
+    fn dead_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    #[test]
+    fn dead_endpoint_blocks_restart_only_briefly_and_never_spins() {
+        let root = std::env::temp_dir().join(format!("spritx-dead-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let Claim::Primary(first) = Instance::claim(&root).unwrap() else {
+            panic!("Primary instance expected");
+        };
+        // A wedged owner: its accept thread is gone (so the endpoint is dead)
+        // but the OS lock is still held by a live process. The relaunch must
+        // fail fast instead of retrying the dead endpoint for the full 5 s.
+        let lock = first.leak_lock();
+        std::fs::write(
+            root.join("desktop.json"),
+            serde_json::to_string(&Endpoint {
+                port: dead_port(),
+                token: "0".repeat(64),
+                pid: std::process::id(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let refused = Instance::claim(&root);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "A dead endpoint must not spin for the full 5 s timeout (took {:?})",
+            started.elapsed()
+        );
+        // `Claim` deliberately has no `Debug` (it owns the desktop instance), so
+        // match instead of `unwrap_err()`.
+        let message = match refused {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => panic!("A wedged owner must be reported, not silently ignored"),
+        };
+        assert!(
+            message.contains("dead reopen endpoint"),
+            "The failure must name the dead endpoint, got: {message}"
+        );
+        drop(lock);
+
+        // A genuinely dead owner releases the OS lock, so even with the stale
+        // `desktop.json` still advertising the dead port, the relaunch must
+        // become the primary instead of refusing.
+        let started = std::time::Instant::now();
+        let claimed = Instance::claim(&root).unwrap();
+        assert!(
+            matches!(claimed, Claim::Primary(_)),
+            "A stale endpoint must not permanently block restart"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(claimed);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

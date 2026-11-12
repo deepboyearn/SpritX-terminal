@@ -504,6 +504,83 @@ fn ft_watch_key(root: &Path, show_hidden: bool, expanded: &[String]) -> FtWatchK
     }
 }
 
+/// Root resolution memo for one cwd. `cwd` is the raw (pre-tilde) pane cwd the
+/// key was computed for; a changed cwd — including the empty string a
+/// session-less render passes — invalidates the entry. Both fields are
+/// written and read only under `root_slot()`, which the render thread alone
+/// touches; the watcher never reads them, so a session opening or closing
+/// cannot disturb its own guard.
+struct FtRootCache {
+    cwd: String,
+    root: Option<PathBuf>,
+}
+
+fn ft_root_slot() -> &'static Mutex<Option<FtRootCache>> {
+    static SLOT: LazyLock<Mutex<Option<FtRootCache>>> = LazyLock::new(|| Mutex::new(None));
+    &SLOT
+}
+
+/// Publish `(cwd, root)` and drop everything pinned to a different cwd: the
+/// loaded tree cache, the in-flight set and the git snapshot all key on root
+/// path, so a stale entry left behind could only be picked up again by a
+/// later return to that same path — with a stale refresh counter and a stale
+/// tree. The watcher is deliberately spared: it owns its own root/toggle
+/// guard and retargets itself when its key stops matching.
+fn set_resolved_root(cwd: &str, root: Option<&Path>) {
+    {
+        let mut guard = ft_root_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(FtRootCache {
+            cwd: cwd.to_string(),
+            root: root.map(Path::to_path_buf),
+        });
+    }
+    let live = root.map(|path| path.to_string_lossy().into_owned());
+    let mut cache = cache_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache
+        .as_ref()
+        .is_some_and(|entry| Some(entry.key.root.as_str()) != live.as_deref())
+    {
+        *cache = None;
+    }
+    drop(cache);
+    in_flight_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|key| Some(key.root.as_str()) == live.as_deref());
+    let mut git = git_statuses_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if git
+        .as_ref()
+        .is_some_and(|(key, _)| Some(key.root.as_str()) != live.as_deref())
+    {
+        *git = None;
+    }
+}
+
+/// Resolve a root without blocking the render thread on the filesystem: the
+/// same cwd reuses the memoized root for an unchanged cwd, and a stat or
+/// `current_dir()` call runs only when the cwd string changes.
+fn cached_resolve_root(cwd: &str) -> Option<PathBuf> {
+    {
+        let guard = ft_root_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.as_ref() {
+            if entry.cwd == cwd {
+                return entry.root.clone();
+            }
+        }
+    }
+    let root = resolve_root(cwd);
+    set_resolved_root(cwd, root.as_deref());
+    root
+}
+
 /// Stop the sampler without starting work. Used when the whole panel is not
 /// rendered (sidebar hidden, file list collapsed, or no live leaf remains).
 fn stop_ft_watcher() {
@@ -769,7 +846,7 @@ fn maybe_start_watcher(root: &Path, ui: &FtUi, cx: &mut Context<SpritXApp>) {
                         }
                         let leaf = app.active_leaf();
                         let cwd = leaf.map(|l| l.cwd.clone()).unwrap_or_default();
-                        let Some(current_root) = resolve_root(&cwd) else {
+                        let Some(current_root) = cached_resolve_root(&cwd) else {
                             return;
                         };
                         let ui_now = ft_ui(app);
@@ -1169,7 +1246,7 @@ fn maybe_start_load(root: &Path, ui: &FtUi, cx: &mut Context<SpritXApp>) {
             // this refresh key, so the next refresh bump retries.
             let leaf = app.active_leaf();
             let cwd = leaf.map(|l| l.cwd.clone()).unwrap_or_default();
-            let current_root = resolve_root(&cwd);
+            let current_root = cached_resolve_root(&cwd);
             let ui_now = ft_ui(app);
             if let Some(want) = current_root
                 .as_deref()
@@ -1206,7 +1283,10 @@ pub fn render(app: &SpritXApp, cx: &mut Context<SpritXApp>) -> AnyElement {
     let leaf = app.active_leaf();
     let loading = leaf.is_none();
     let cwd = leaf.map(|l| l.cwd.clone()).unwrap_or_default();
-    let root = resolve_root(&cwd);
+    // Memoized per cwd: no filesystem stat and no `current_dir()` on the
+    // render thread while the pane cwd is unchanged, so a slow or network
+    // mount cannot stall the frame.
+    let root = cached_resolve_root(&cwd);
 
     let title = root
         .as_deref()

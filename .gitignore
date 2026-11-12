@@ -11,3 +11,7 @@
 .vscode/
 *.swp
 .DS_Store
+
+# Stray empty artifact directory named `bad` + U+F00A + `dir` (private-use
+# glyph, invisible in most tools). Glob so a `git add -A` cannot capture it.
+bad*dir/

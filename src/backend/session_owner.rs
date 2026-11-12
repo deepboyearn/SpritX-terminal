@@ -148,9 +148,24 @@ impl Connection {
         Ok(reply)
     }
 
+    /// True when this connection cannot be used, so the caller should start a
+    /// fresh session instead of trying to reattach.
+    ///
+    /// Only `ConnectionRefused` used to count, which missed the case that
+    /// actually bites: a stale `owner-*.json` whose port is no longer owned by
+    /// the owner process but is still resident in the TCP stack, so the kernel
+    /// silently drops the SYN and `connect_timeout` reports `TimedOut` rather
+    /// than a refusal. That left the restore path attempting a full attach,
+    /// which then failed 2 s later on the socket read timeout with
+    /// "connection timed out" and left the pane showing a dead shell the user
+    /// had to reopen by hand. Any failure to reach the port means the same
+    /// thing here: there is no owner to reattach to.
     pub fn unavailable(&self) -> bool {
-        matches!(TcpStream::connect_timeout(&([127,0,0,1], self.port).into(), Duration::from_millis(400)),
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused)
+        TcpStream::connect_timeout(
+            &([127, 0, 0, 1], self.port).into(),
+            Duration::from_millis(400),
+        )
+        .is_err()
     }
 }
 

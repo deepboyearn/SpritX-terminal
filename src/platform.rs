@@ -1,7 +1,7 @@
 //! Platform defaults shared by persistence, shell sessions and file actions.
 use std::path::PathBuf;
 
-mod powershell;
+pub mod powershell;
 pub use powershell::POWERSHELL_INIT;
 
 pub fn command_completed(
@@ -148,4 +148,41 @@ pub fn parse_shell_args(value: &str) -> Result<Vec<String>, String> {
     } else {
         Ok(value.split_whitespace().map(str::to_string).collect())
     }
+}
+
+/// Whether these are SpritX's own shell-integration switches rather than an
+/// argument list the user asked for.
+///
+/// Used when restoring a checkpointed session: saved arguments are replayed
+/// verbatim, so one written by an older release keeps whatever launch form that
+/// release used. Replaying a stale integration payload alongside the current one
+/// (or replaying a form the installed shell rejects) is unrecoverable — PowerShell
+/// answers with CommandNotFound and the pane fills with the prompt script. Any
+/// list that carries our marker is therefore treated as regenerable, and the
+/// caller re-derives it from the user's live settings instead.
+pub fn looks_like_integration_args(args: &[String]) -> bool {
+    let plaintext_marker = args.iter().any(|arg| {
+        arg.contains("SpritXPromptEnabled")
+            || arg.contains("SpritXCommandRunning")
+            || arg.contains("]133;C")
+            || arg.contains("spritx-shell-init")
+            // The bash/zsh rc files `shell_setup` generates.
+            || arg.contains("gpui-bashrc")
+            || arg.contains("gpui-zdotdir")
+            || arg.contains("spritx-prompt.")
+    });
+    if plaintext_marker {
+        return true;
+    }
+    // The current form hides the payload inside `-EncodedCommand`'s base64, so
+    // the marker scan above cannot see it. Decode and look again rather than
+    // guessing from the switch names alone — an `-EncodedCommand` the user
+    // supplied themselves must not be discarded on restore.
+    args.iter().any(|arg| {
+        crate::platform::powershell::decode_encoded_payload(arg).is_some_and(|decoded| {
+            decoded.contains("SpritXPromptEnabled")
+                || decoded.contains("SpritXCommandRunning")
+                || decoded.contains("spritx-shell-init")
+        })
+    })
 }

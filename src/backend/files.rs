@@ -9,6 +9,8 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 /// The sidebar only ever renders a few thousand rows; matching the Tauri
 /// backend's cap keeps a directory with a million entries from stalling the
 /// UI thread.
@@ -43,7 +45,7 @@ pub struct FsEntry {
 /// case-insensitively, with the byte-wise name as a stable tie-breaker.
 pub fn list_dir(path: impl AsRef<Path>, show_hidden: bool) -> io::Result<Vec<FsEntry>> {
     let base = path.as_ref();
-    let mut out = Vec::new();
+    let mut candidates = Vec::new();
 
     for entry in fs::read_dir(base)? {
         // A directory can be readable as a whole while individual entries are
@@ -55,33 +57,46 @@ pub fn list_dir(path: impl AsRef<Path>, show_hidden: bool) -> io::Result<Vec<FsE
             continue;
         }
 
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        let symlink = file_type.is_symlink();
-        let path = entry.path();
-        // `file_type` does not follow symlinks, so resolve links to decide
-        // whether the row should be expandable.
-        let is_dir = file_type.is_dir() || (symlink && path.is_dir());
-        // `DirEntry::metadata` reports the link itself on Unix, so follow
-        // symlinks explicitly to show the target's size.
-        let size = if is_dir {
-            0
-        } else {
-            fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
-        };
-
-        out.push(FsEntry {
-            name,
-            path,
-            is_dir,
-            size,
-            symlink,
-        });
-        if out.len() >= MAX_ENTRIES {
+        candidates.push((name, entry));
+        if candidates.len() >= MAX_ENTRIES {
             break;
         }
     }
+
+    // Per-entry work is one blocking `file_type`/`metadata` syscall each, and
+    // on a network or mapped drive every stat is a round-trip: a 5000-entry
+    // directory cost 5000 sequential round-trips before this. Stats are pure
+    // and independent, so the fan-out is safe; the collected `DirEntry`s keep
+    // read order, and the results are re-sorted by name below, so the output
+    // stays byte-for-byte identical to the serial version. The cap is applied
+    // to `candidates` first, so the parallel stage is bounded to
+    // `MAX_ENTRIES` rows and can never emit more.
+    let mut out: Vec<FsEntry> = candidates
+        .into_par_iter()
+        .filter_map(|(name, entry)| {
+            let file_type = entry.file_type().ok()?;
+            let symlink = file_type.is_symlink();
+            let path = entry.path();
+            // `file_type` does not follow symlinks, so resolve links to decide
+            // whether the row should be expandable.
+            let is_dir = file_type.is_dir() || (symlink && path.is_dir());
+            // `DirEntry::metadata` reports the link itself on Unix, so follow
+            // symlinks explicitly to show the target's size.
+            let size = if is_dir {
+                0
+            } else {
+                fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            };
+
+            Some(FsEntry {
+                name,
+                path,
+                is_dir,
+                size,
+                symlink,
+            })
+        })
+        .collect();
 
     out.sort_by(|a, b| {
         b.is_dir

@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -391,6 +392,143 @@ pub fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     result
 }
 
+/// Upper bound on distinct pending writes. Keys are paths, and the real app
+/// only ever has a handful (config.toml + workspace.json), so this is just a
+/// hard ceiling; exceeding it falls back to a synchronous write rather than
+/// growing the queue without bound.
+const MAX_PENDING_WRITES: usize = 64;
+
+/// Pending writes, newest body per path. A `HashMap` (not a queue) because a
+/// fast checkpoint cadence must *coalesce*: if the writer thread is mid-write
+/// when the next 2-second checkpoint fires, the older snapshot for the same
+/// path is stale and superseding it keeps the queue at one entry per file.
+#[derive(Default)]
+struct WriteQueue {
+    pending: HashMap<PathBuf, String>,
+    /// Count of bodies currently being written by the writer thread (popped
+    /// from `pending` but not yet persisted). [`flush_writes`] must wait for
+    /// this to reach zero, else it could return in the gap between the pop and
+    /// the fsync — exactly the checkpoint shutdown is meant to protect.
+    in_flight: u64,
+    /// Bumped by the writer each time the queue empties. [`flush_writes`]
+    /// waits for it to advance past the value it observed, so a repeated flush
+    /// (background, then quit) works and a flush with nothing queued returns
+    /// immediately.
+    drained: u64,
+}
+
+/// Set true once the writer thread has been spawned. [`flush_writes`] checks
+/// this first so an app that never checkpointed does not spawn an idle thread.
+static WRITER_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn write_queue() -> &'static (std::sync::Mutex<WriteQueue>, std::sync::Condvar) {
+    static QUEUE: LazyLock<(std::sync::Mutex<WriteQueue>, std::sync::Condvar)> =
+        LazyLock::new(|| {
+            let state = (
+                std::sync::Mutex::new(WriteQueue::default()),
+                std::sync::Condvar::new(),
+            );
+            std::thread::Builder::new()
+                .name("spritx-config-writer".into())
+                .spawn(writer_loop)
+                .map_err(|e| eprintln!("[spritx] could not spawn config writer thread: {e}"))
+                .ok();
+            WRITER_STARTED.store(true, std::sync::atomic::Ordering::Release);
+            state
+        });
+    &QUEUE
+}
+
+/// Queue an atomic write to run on the background writer thread.
+///
+/// WHY: callers include the 2-second workspace checkpoint, whose body can reach
+/// megabytes when pane screens are saved. Doing `serialize + write_all +
+/// sync_all` (plus the parent-directory `sync_all`) inline froze the UI for the
+/// duration of the fsync. This hands the bytes to a dedicated thread, keeping
+/// the atomic temp-file + rename guarantee and the on-disk format identical.
+/// On the (unlikely) failure to spawn the writer, the write runs inline so
+/// callers still make progress.
+pub fn write_atomic_async(path: PathBuf, body: String) {
+    let (lock, wake) = write_queue();
+    let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.pending.len() >= MAX_PENDING_WRITES && !guard.pending.contains_key(&path) {
+        // Distinct-path ceiling reached: this is a bug or a runaway caller;
+        // write inline rather than drop the user's data.
+        drop(guard);
+        if let Err(e) = write_atomic(&path, &body) {
+            eprintln!("[spritx] config write {}: {e}", path.display());
+        }
+        return;
+    }
+    guard.pending.insert(path, body);
+    wake.notify_all();
+}
+
+/// Block until every queued write has reached disk. Repeatable — called both
+/// when the app goes to the background and on quit — and bounded so a wedged
+/// disk cannot hang shutdown forever. A no-op when nothing was ever queued.
+pub fn flush_writes() {
+    // Nothing was ever queued: do not start the writer thread just to wait on
+    // an empty queue.
+    if !WRITER_STARTED.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let (lock, wake) = write_queue();
+    let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Wait for both the queue to empty and any in-flight write to finish. The
+    // `drained` watermark handles bodies already persisted; `in_flight` covers
+    // the pop→fsync gap that the watermark alone would miss.
+    let target = guard.drained.wrapping_add(if guard.pending.is_empty() { 0 } else { 1 });
+    wake.notify_all();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while (guard.drained < target || guard.in_flight > 0) && std::time::Instant::now() < deadline {
+        let (next, _) = wake
+            .wait_timeout(guard, std::time::Duration::from_millis(20))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard = next;
+    }
+}
+
+/// Writer thread body: pop one path at a time and persist it atomically.
+fn writer_loop() {
+    let (lock, wake) = write_queue();
+    loop {
+        let next = {
+            let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            while guard.pending.is_empty() {
+                guard = wake
+                    .wait(guard)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            // Take exactly one path out at a time; `drain().next()` would drop
+            // every other entry in the map (the rest of the drained iterator).
+            let queued = guard
+                .pending
+                .keys()
+                .next()
+                .cloned()
+                .and_then(|path| guard.pending.remove(&path).map(|body| (path, body)));
+            if queued.is_some() {
+                guard.in_flight += 1;
+            }
+            queued
+        };
+        if let Some((path, body)) = next {
+            if let Err(e) = write_atomic(&path, &body) {
+                eprintln!("[spritx] config write {}: {e}", path.display());
+            }
+        }
+        // Publish the drain and wake any `flush_writes` waiter.
+        let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.in_flight = guard.in_flight.saturating_sub(1);
+        if guard.pending.is_empty() {
+            guard.drained = guard.drained.wrapping_add(1);
+        }
+        drop(guard);
+        wake.notify_all();
+    }
+}
+
 /// Load the user config, creating a commented default file on first run.
 pub fn load() -> AppConfig {
     let Some(path) = config_path() else {
@@ -615,6 +753,23 @@ mod tests {
         assert_eq!(loaded.appearance.font_size, DEFAULT_TERMINAL_FONT_SIZE);
         assert!(!path.exists());
         assert!(dir.join("config.toml.broken").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An async write lands on disk (same bytes, atomic rename) and
+    /// `flush_writes` is a bounded barrier that does not hang.
+    #[test]
+    fn async_write_reaches_disk_after_flush() {
+        let dir = temp_dir("async");
+        let path = dir.join("sessions").join("workspace.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_atomic_async(path.clone(), "{\"hello\":1}".to_string());
+        flush_writes();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"hello\":1}");
+        // A second flush with an empty queue returns promptly.
+        let started = std::time::Instant::now();
+        flush_writes();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

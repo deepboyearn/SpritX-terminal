@@ -7,11 +7,19 @@ use std::path::Path;
 impl SpritXApp {
     pub fn prepare_for_background(&mut self) {
         self.checkpoint_workspace();
+        // The checkpoint was handed to the background writer; flush before the
+        // process can be suspended/exited so the newest snapshot reaches disk.
+        crate::backend::config::flush_writes();
+        crate::backend::history::flush_history(std::time::Duration::from_secs(5));
     }
 
     pub fn quit_desktop(&mut self, cx: &mut Context<Self>) {
         self.desktop_quitting = true;
         self.checkpoint_workspace();
+        // Persist the queued checkpoint (and any pending history) before the
+        // session teardown below, which ends in `cx.quit()`.
+        crate::backend::config::flush_writes();
+        crate::backend::history::flush_history(std::time::Duration::from_secs(5));
         for session in self.sessions.values_mut() {
             session.set_keep_on_drop(false);
             session.kill();
@@ -104,13 +112,21 @@ impl SpritXApp {
                             self.settings.keep_sessions && self.settings.restore_workspace,
                         );
                         self.sessions.insert(pane, session);
+                        return true;
                     }
                     Err(error) => {
-                        self.session_errors.insert(pane, format!("Could not reconnect: {error:#}. Reopen the project to start a new session."));
+                        // Reattaching failed, but a broken owner must not leave
+                        // the pane dead: fall through and start a fresh shell in
+                        // the saved folder. `restored_sessions` still holds the
+                        // retry payload, so a later successful reconnect can
+                        // replace this shell if the owner comes back.
+                        self.session_errors.insert(
+                            pane,
+                            format!("Could not reconnect: {error:#}. Started a new shell instead."),
+                        );
                         self.restored_sessions.insert(pane, retry);
                     }
                 }
-                return true;
             }
         }
         if !config
@@ -121,13 +137,25 @@ impl SpritXApp {
             config.cwd =
                 crate::backend::files::home_dir().map(|path| path.to_string_lossy().into_owned());
         }
-        // An ended CLI returns to a shell. A saved shell keeps its own configuration.
-        if config.track_process {
+        // A saved shell must be respawned from *current* settings, not from the
+        // arguments baked into the checkpoint. Those arguments are SpritX's own
+        // integration switches, and an older release shipped a form that no
+        // longer appends cleanly: a persisted `-Command ". @'…'@"` is replayed
+        // verbatim on a modern build and PowerShell rejects the whole thing with
+        // CommandNotFound, which is what showed up as a wall of prompt script in
+        // the terminal. An ended CLI (`track_process`) always returns to a shell
+        // too. Both cases re-derive the args; only a deliberate user override
+        // (saved args that are not SpritX integration) is kept as-is.
+        let saved_args_are_integration = crate::platform::looks_like_integration_args(&config.args);
+        if config.track_process || saved_args_are_integration {
+            let saved = self.settings.shell_args.clone();
+            let args = crate::platform::parse_shell_args(&saved).unwrap_or_default();
             config = crate::terminal::SessionConfig::for_shell(
                 Some(&self.settings.shell_program),
-                &crate::platform::parse_shell_args(&self.settings.shell_args).unwrap_or_default(),
+                &args,
                 config.cwd,
-            );
+            )
+            .with_integrated_args_ignored(!saved.contains("EncodedCommand"));
         }
         if self.settings.save_terminal_output && !saved.screen.is_empty() {
             config.initial_output = Some(saved.screen);
@@ -203,8 +231,37 @@ impl SpritXApp {
             sessions,
             ..Default::default()
         };
-        if let Err(error) = workspace::save(&snapshot) {
-            eprintln!("[spritx] workspace save: {error}");
+        // The fsync (and the parent-directory sync that follows the rename) is
+        // the expensive part of this save, and this runs from the 500 ms UI
+        // timer: with saved pane screens the JSON reaches megabytes, so an
+        // inline `workspace::save` froze the UI every couple of seconds. Build
+        // the body here (serialization is CPU-only, no syscall) and hand the
+        // bytes to the background config writer, which keeps the same atomic
+        // temp-file + rename + fsync guarantee off the UI thread.
+        let path = match workspace::path() {
+            Some(path) => path,
+            None => {
+                self.workspace_last_save = std::time::Instant::now();
+                return;
+            }
+        };
+        // Preserve the directory hardening `workspace::save` used to do: the
+        // sessions directory holds owner credentials. `secure_directory` is
+        // memoized (a `HashSet` hit after the first call), so only the first
+        // tick pays the platform ACL command.
+        if let Some(parent) = path.parent() {
+            if let Err(error) = crate::backend::session_owner::secure_directory(parent) {
+                eprintln!(
+                    "[spritx] could not secure session directory {}: {error}",
+                    parent.display()
+                );
+                self.workspace_last_save = std::time::Instant::now();
+                return;
+            }
+        }
+        match serde_json::to_string(&snapshot) {
+            Ok(body) => crate::backend::config::write_atomic_async(path, body),
+            Err(error) => eprintln!("[spritx] workspace save: {error}"),
         }
         self.workspace_last_save = std::time::Instant::now();
     }
